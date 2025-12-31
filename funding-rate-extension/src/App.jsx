@@ -55,10 +55,32 @@ const fetchBinanceRates = async () => {
   }
 };
 
+
+let serverTimeOffset = 0;
+
 const fetchCoinSwitchRates = async () => {
   try {
+    // 1. Sync Time if needed (lazy load)
+    if (serverTimeOffset === 0) {
+        try {
+            const timeRes = await fetch('/api/coinswitch/trade/api/v2/ping');
+            if (timeRes.ok) {
+                const timeData = await timeRes.json();
+                // Check common timestamp keys
+                const serverTime = timeData.time || timeData.server_time || timeData.timestamp || timeData.server_timestamp;
+                if (serverTime) {
+                    serverTimeOffset = serverTime - Date.now();
+                    console.log("Time Sync Offset:", serverTimeOffset);
+                }
+            }
+        } catch (e) {
+            console.warn("Time sync failed, using local time", e);
+        }
+    }
+
     const method = "GET";
-    const epoch = Date.now().toString();
+    // Apply offset to match server time
+    const epoch = (Date.now() + serverTimeOffset).toString();
     const signature = generateSignature(method, COINSWITCH_API_URL, null, epoch);
 
     const headers = {
@@ -79,6 +101,8 @@ const fetchCoinSwitchRates = async () => {
     
     if (!res.ok) {
         console.error("CoinSwitch API Error", res.status, res.statusText);
+        // If 401, maybe force re-sync next time?
+        if (res.status === 401) serverTimeOffset = 0;
         return {};
     }
 
