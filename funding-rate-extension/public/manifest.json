@@ -1,0 +1,16 @@
+{
+    "manifest_version": 3,
+    "name": "Funding Fee Arb Bot",
+    "version": "1.0",
+    "description": "Monitor and arbitrage funding fees across exchanges.",
+    "action": {
+        "default_popup": "index.html"
+    },
+    "permissions": [
+        "storage"
+    ],
+    "host_permissions": [
+        "https://fapi.binance.com/*",
+        "https://api.delta.exchange/*"
+    ]
+}
