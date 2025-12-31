@@ -34,6 +34,11 @@ import urllib
 
 import functools
 
+# Bybit Configuration
+BYBIT_API_URL = "https://api.bybit.com/v5/market/tickers"
+BYBIT_API_KEY = "GS68TldhIYqdRUOz4V"
+BYBIT_SECRET = "b5suxCOFWQsV2IoGDZ2HnNyhxDvt4NQNAReK"
+
 async def fetch_binance_rates():
     try:
         loop = asyncio.get_event_loop()
@@ -55,128 +60,51 @@ async def fetch_binance_rates():
         return {}
     return {}
 
-# Circuit Breaker Globals
-CS_FAIL_COUNT = 0
-CS_CIRCUIT_OPEN = False
-
-def generate_signature(method, endpoint, params, payload):
-    # Logic from user provided snippet
-    signing_endpoint = endpoint
-    if method == "GET" and params:
-        separator = '&' if '?' in endpoint else '?'
-        signing_endpoint += separator + urlencode(params)
-        signing_endpoint = unquote_plus(signing_endpoint)
-    else:
-        signing_endpoint = unquote_plus(endpoint)
-
-    json_payload = json.dumps(payload, separators=(',', ':'), sort_keys=True) if payload else "{}"
-    
-    signature_msg = method + signing_endpoint + json_payload
-    
-    secret_key_bytes = bytes.fromhex(COINSWITCH_SECRET_KEY)
-    secret_key_obj = ed25519.Ed25519PrivateKey.from_private_bytes(secret_key_bytes)
-    signature_bytes = secret_key_obj.sign(bytes(signature_msg, 'utf-8'))
-    return signature_bytes.hex()
-
-async def fetch_coinswitch_rates():
-    global CS_FAIL_COUNT, CS_CIRCUIT_OPEN
-    
-    if CS_CIRCUIT_OPEN:
-        return {}
-
-async def fetch_coinswitch_rates():
-    global CS_FAIL_COUNT, CS_CIRCUIT_OPEN
-    
-    if CS_CIRCUIT_OPEN:
-        return {}
-
+async def fetch_bybit_rates():
     try:
-        endpoint_path = "/trade/api/v2/24hr/all-pairs/ticker"
-        # User requested coinswitchx
-        exchange = "coinswitchx"
-        
-        all_rates = {}
         loop = asyncio.get_event_loop()
+        params = {"category": "linear"}
         
-        params = {"exchange": exchange}
-        # Generate signature for this specific request
-        signature = generate_signature("GET", endpoint_path, params, {})
+        # Public endpoint allows fetching all tickers without signature if limits permit.
+        # Given we just need a single call, we can try without signature first which is simpler.
+        # But user gave keys, so let's use standard public access for now as verified in check_bybit.py
         
-        headers = {
-            'Content-Type': 'application/json',
-            'X-AUTH-SIGNATURE': signature,
-            'X-AUTH-APIKEY': COINSWITCH_API_KEY
-        }
+        response = await loop.run_in_executor(None, functools.partial(requests.get, BYBIT_API_URL, params=params))
         
-        url = "https://coinswitch.co" + endpoint_path
-        
-        # Run request
-        try:
-            response = await loop.run_in_executor(
-                None, 
-                functools.partial(requests.get, url, params=params, headers=headers)
-            )
-            
-            if response.status_code == 200:
-                CS_FAIL_COUNT = 0
-                data = response.json()
-                
-                items = []
-                if 'data' in data:
-                    d = data['data']
-                    if isinstance(d, list):
-                        items = d
-                    elif isinstance(d, dict):
-                        for k, v in d.items():
-                            v['symbol'] = k
-                            items.append(v)
-                
-                for item in items:
-                    raw_symbol = item.get('symbol', '') or item.get('pair', '')
-                    if raw_symbol:
-                        # Normalize
-                        symbol = raw_symbol.split('/')[0]
+        if response.status_code == 200:
+            data = response.json()
+            if data['retCode'] == 0:
+                rates = {}
+                for item in data['result']['list']:
+                    if item['symbol'].endswith('USDT'):
+                        # Remove USDT suffix
+                        symbol = item['symbol'][:-4] 
                         
-                        rate = float(item.get('funding_rate', 0) or item.get('lastFundingRate', 0))
-                        mark_price = float(item.get('mark_price', 0) or item.get('last_price', 0))
+                        fr = item.get('fundingRate', '0')
+                        mp = item.get('markPrice', '0')
                         
-                        all_rates[symbol] = {
-                            "rate": rate,
-                            "markPrice": mark_price
+                        rates[symbol] = {
+                            "rate": float(fr) if fr else 0.0,
+                            "markPrice": float(mp) if mp else 0.0
                         }
-                return all_rates
-
+                return rates
             else:
-                CS_FAIL_COUNT += 1
-                print(f"CS {exchange} Failed: {response.status_code} | {response.text[:100]}")
-                if CS_FAIL_COUNT >= 5:
-                    CS_CIRCUIT_OPEN = True
-                return {}
-
-        except Exception as e:
-            CS_FAIL_COUNT += 1
-            print(f"CS {exchange} Error: {e}")
-            if CS_FAIL_COUNT >= 5:
-                CS_CIRCUIT_OPEN = True
-            return {}
-
+                print(f"Bybit API Error: {data['retMsg']}")
     except Exception as e:
-        CS_FAIL_COUNT += 1
-        print(f"CoinSwitch connection error: {e}")
-        if CS_FAIL_COUNT >= 5:
-            CS_CIRCUIT_OPEN = True
-        return {}
+        print(f"Bybit Error: {e}")
+    return {}
 
 @app.get("/api/rates")
 async def get_rates():
+    # Fetch both concurrently
     binance_task = fetch_binance_rates()
-    coinswitch_task = fetch_coinswitch_rates()
+    bybit_task = fetch_bybit_rates()
     
-    binance_rates, coinswitch_rates = await asyncio.gather(binance_task, coinswitch_task)
+    binance_rates, bybit_rates = await asyncio.gather(binance_task, bybit_task)
     
     return {
         "binance": binance_rates,
-        "coinswitch": coinswitch_rates
+        "bybit": bybit_rates
     }
 
 if __name__ == "__main__":

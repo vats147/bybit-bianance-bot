@@ -146,7 +146,7 @@ function App() {
   const [connectionStatus, setConnectionStatus] = useState({ binance: 'disconnected', coinswitch: 'disconnected' });
 
   // detailed map to keep store of latest data
-  // symbol -> { binanceRate, coinSwitchRate, ... }
+  // symbol -> { binanceRate, bybitRate, ... }
   const dataRef = useRef({});
 
   const updateTableData = () => {
@@ -154,32 +154,35 @@ function App() {
     const merged = Object.values(dataRef.current)
       .map(item => {
         let spread = 0;
+        let diff = 0;
         let apr = 0;
         const binanceRateVal = item.binanceRate !== undefined ? item.binanceRate : 0;
-        const coinSwitchRateVal = item.coinSwitchRate !== undefined ? item.coinSwitchRate : 0;
+        const bybitRateVal = item.bybitRate !== undefined ? item.bybitRate : 0;
         const markPrice = item.markPrice || 0;
 
         // Calculate spread if we have rates (or default to 0)
         // Ensure we display rows even if one side is missing to help debug 'missing data'
 
         const binanceRatePct = binanceRateVal * 100;
-        const coinSwitchRatePct = coinSwitchRateVal * 100; // Treat as decimal like Binance
+        const bybitRatePct = bybitRateVal * 100; // Treat as decimal like Binance
 
         // Only calculate spread if we have both
-        if (item.binanceRate !== undefined && item.coinSwitchRate !== undefined) {
-          spread = Math.abs(binanceRatePct - coinSwitchRatePct);
+        if (item.binanceRate !== undefined && item.bybitRate !== undefined) {
+          spread = Math.abs(binanceRatePct - bybitRatePct);
+          diff = binanceRatePct - bybitRatePct;
           apr = spread * 3 * 365;
         }
 
         return {
           ...item,
           spread,
+          diff: diff || 0,
           apr,
           markPrice,
           binanceRate: binanceRateVal * 100,
-          coinSwitchRate: coinSwitchRateVal * 100,
+          bybitRate: bybitRateVal * 100,
           binanceRateRaw: binanceRateVal,
-          coinSwitchRateRaw: coinSwitchRateVal
+          bybitRateRaw: bybitRateVal
         };
       })
       // Filter out incomplete rows ONLY if user wants strict mode (optional), 
@@ -205,7 +208,7 @@ function App() {
     if (!isLive) return; // Don't connect if Live Mode is OFF
 
     let binanceWS = null;
-    // let coinSwitchWS = null; // Placeholder
+    // let bybitWS = null; // Placeholder
 
     const connectSockets = () => {
       // ... (existing WS connection logic)
@@ -229,7 +232,7 @@ function App() {
           }
         } catch (e) { }
       };
-      // 2. CoinSwitch - No Public WebSocket known yet
+      // 2. Bybit - No Public WebSocket known yet
       // Placeholder for future implementation
     };
 
@@ -249,10 +252,10 @@ function App() {
       // Don't show global loading spinner on background refreshes
       // setLoading(true); 
       try {
-        const { binance, coinswitch } = await fetchRates();
+        const { binance, bybit } = await fetchRates();
 
         const b = binance || {};
-        const c = coinswitch || {};
+        const c = bybit || {};
 
         Object.keys(b).forEach(s => {
           if (!dataRef.current[s]) dataRef.current[s] = { symbol: s };
@@ -261,8 +264,8 @@ function App() {
         });
         Object.keys(c).forEach(s => {
           if (!dataRef.current[s]) dataRef.current[s] = { symbol: s };
-          dataRef.current[s].coinSwitchRate = c[s].rate;
-          if (c[s].markPrice) dataRef.current[s].markPrice = c[s].markPrice; // Use CS price if available? Mostly stick to Binance
+          dataRef.current[s].bybitRate = c[s].rate;
+          if (c[s].markPrice) dataRef.current[s].markPrice = c[s].markPrice; // Use Bybit price if available? Mostly stick to Binance
         });
 
         // If this was the first load, turn off loading
@@ -280,6 +283,8 @@ function App() {
     return () => clearInterval(pollInterval);
   }, []);
 
+  const [searchQuery, setSearchQuery] = useState("");
+
   // Sorting Logic
   const sortedData = useMemo(() => {
     let sortableItems = [...data];
@@ -294,8 +299,12 @@ function App() {
         return 0;
       });
     }
-    return sortableItems.filter(item => item.spread >= parseFloat(minSpread));
-  }, [data, sortConfig, minSpread]);
+    return sortableItems.filter(item => {
+      const matchesSpread = item.spread >= parseFloat(minSpread);
+      const matchesSearch = item.symbol.toLowerCase().includes(searchQuery.toLowerCase());
+      return matchesSpread && matchesSearch;
+    });
+  }, [data, sortConfig, minSpread, searchQuery]);
 
   const requestSort = (key) => {
     let direction = 'ascending';
@@ -322,7 +331,7 @@ function App() {
         `🪙 *${item.symbol}*\n` +
         `📉 Spread: ${item.spread.toFixed(4)}%\n` +
         `🔶 Binance: ${item.binanceRate.toFixed(4)}%\n` +
-        `💠 CoinSwitch: ${item.coinSwitchRate.toFixed(4)}%`
+        `💠 Bybit: ${item.bybitRate.toFixed(4)}%`
       ).join('\n\n');
 
     try {
@@ -352,7 +361,7 @@ function App() {
               Funding Arb Bot
             </h1>
             <p className="text-muted-foreground mt-1">
-              Real-time funding rate arbitrage monitor (Binance vs CoinSwitch Pro)
+              Real-time funding rate arbitrage monitor (Binance vs Bybit)
             </p>
           </div>
 
@@ -370,7 +379,7 @@ function App() {
                 BN: {connectionStatus.binance === 'connected' ? 'LIVE' : 'OFF'}
               </span>
               <span className={cn("text-[10px] px-1 rounded border", connectionStatus.coinswitch === 'connected' ? "bg-green-500/20 border-green-500 text-green-500" : "bg-red-500/20 border-red-500 text-red-500")}>
-                CS: {connectionStatus.coinswitch === 'connected' ? 'LIVE' : 'OFF'}
+                BB: {connectionStatus.coinswitch === 'connected' ? 'LIVE' : 'OFF'}
               </span>
             </div>
             <Button size="sm" variant="outline" onClick={updateTableData} disabled={loading}>
@@ -419,6 +428,16 @@ function App() {
                   className="h-8"
                 />
               </div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs whitespace-nowrap w-20">Search</span>
+                <Input
+                  type="text"
+                  placeholder="Symbol..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="h-8"
+                />
+              </div>
             </CardContent>
           </Card>
         </div>
@@ -463,11 +482,14 @@ function App() {
                   <TableHead onClick={() => requestSort('binanceRate')} className="cursor-pointer hover:text-primary transition-colors whitespace-nowrap min-w-[120px]">
                     Binance Rate % <ArrowUpDown className="inline h-3 w-3 ml-1" />
                   </TableHead>
-                  <TableHead onClick={() => requestSort('coinSwitchRate')} className="cursor-pointer hover:text-primary transition-colors whitespace-nowrap min-w-[120px]">
-                    CoinSwitch Pro Rate % <ArrowUpDown className="inline h-3 w-3 ml-1" />
+                  <TableHead onClick={() => requestSort('bybitRate')} className="cursor-pointer hover:text-primary transition-colors whitespace-nowrap min-w-[120px]">
+                    Bybit Rate % <ArrowUpDown className="inline h-3 w-3 ml-1" />
                   </TableHead>
                   <TableHead onClick={() => requestSort('spread')} className="cursor-pointer hover:text-primary transition-colors whitespace-nowrap min-w-[120px]">
                     Spread % <ArrowUpDown className="inline h-3 w-3 ml-1" />
+                  </TableHead>
+                  <TableHead onClick={() => requestSort('diff')} className="cursor-pointer hover:text-primary transition-colors whitespace-nowrap min-w-[120px]">
+                    Diff % <ArrowUpDown className="inline h-3 w-3 ml-1" />
                   </TableHead>
                   <TableHead onClick={() => requestSort('apr')} className="cursor-pointer hover:text-primary transition-colors whitespace-nowrap min-w-[120px]">
                     Est. 3-Day APR %
@@ -515,11 +537,14 @@ function App() {
                       <TableCell className={cn("font-medium", item.binanceRate > 0 ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400")}>
                         {item.binanceRate.toFixed(4)}%
                       </TableCell>
-                      <TableCell className={cn("font-medium", item.coinSwitchRate > 0 ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400")}>
-                        {item.coinSwitchRate ? item.coinSwitchRate.toFixed(4) : '0.0000'}%
+                      <TableCell className={cn("font-medium", item.bybitRate > 0 ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400")}>
+                        {item.bybitRate ? item.bybitRate.toFixed(4) : '0.0000'}%
                       </TableCell>
                       <TableCell className="font-mono font-bold text-blue-600 dark:text-blue-400">
                         {item.spread.toFixed(4)}%
+                      </TableCell>
+                      <TableCell className={cn("font-medium", item.diff > 0 ? "text-green-600 dark:text-green-400" : item.diff < 0 ? "text-red-600 dark:text-red-400" : "text-muted-foreground")}>
+                        {item.diff.toFixed(4)}%
                       </TableCell>
                       <TableCell className="font-medium">
                         {item.apr.toFixed(2)}%
@@ -531,9 +556,9 @@ function App() {
                               <img src="https://bin.bnbstatic.com/static/images/common/favicon.ico" alt="Binance" className="w-4 h-4" />
                             </a>
                           </Button>
-                          <Button size="icon" variant="outline" className="h-8 w-8 p-0 border-purple-500/50 hover:bg-purple-500/10" asChild title="CoinSwitch Pro">
-                            <a href={`https://coinswitch.co/pro/spot/${item.symbol}-USDT`} target="_blank" rel="noopener noreferrer">
-                              <img src="https://coinswitch.co/favicon.ico" alt="CS" className="w-4 h-4" />
+                          <Button size="icon" variant="outline" className="h-8 w-8 p-0 border-purple-500/50 hover:bg-purple-500/10" asChild title="Bybit">
+                            <a href={`https://www.bybit.com/trade/usdt/${item.symbol}USDT`} target="_blank" rel="noopener noreferrer">
+                              <img src="https://www.bybit.com/favicon.ico" alt="Bybit" className="w-4 h-4" />
                             </a>
                           </Button>
                         </div>
