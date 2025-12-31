@@ -9,21 +9,41 @@ import { cn } from "@/lib/utils";
 
 // --- API Helpers ---
 
+import CryptoJS from 'crypto-js';
+
+// --- API Helpers ---
+
 const BINANCE_API = "/api/binance/fapi/v1/premiumIndex";
-const DELTA_API = "/api/delta/v2/tickers";
+// Using the all-pairs ticker endpoint for comprehensive data, targeting coinswitch.co directly
+const COINSWITCH_API_URL = "https://coinswitch.co/trade/api/v2/24hr/all-pairs/ticker?exchange=coinswitchx"; 
+
+const COINSWITCH_API_KEY = "327aea81b9f9bde5830049fa5636af4d8e3057d2739a89b3aef911c49d875b13";
+const COINSWITCH_SECRET_KEY = "7d33e755773b872e39d574ffb61137375a0abd0e1ce8878057fdc94b11bdfe61";
+
+const generateSignature = (method, url, body, epoch) => {
+  // Extract path and query from full URL
+  const urlObj = new URL(url);
+  const path = urlObj.pathname + urlObj.search;
+  
+  // Signature payload: epoch + method + path + body
+  // Source: <epoch_time><HTTP_method><url_path_with_query_params><request_body>
+  const payload = epoch + method + path + (body ? JSON.stringify(body) : "");
+  
+  const signature = CryptoJS.HmacSHA256(payload, COINSWITCH_SECRET_KEY).toString(CryptoJS.enc.Hex);
+  return signature;
+};
 
 const fetchBinanceRates = async () => {
   try {
     const res = await fetch(BINANCE_API);
     const data = await res.json();
-    // Map: Symbol -> Rate
     const rates = {};
     data.forEach(item => {
-      // Binance symbols are like BTCUSDT
       if (item.symbol.endsWith('USDT')) {
         const symbol = item.symbol.replace('USDT', '');
         rates[symbol] = {
           rate: parseFloat(item.lastFundingRate),
+          markPrice: parseFloat(item.markPrice),
           nextFundingTime: item.nextFundingTime
         };
       }
@@ -35,28 +55,73 @@ const fetchBinanceRates = async () => {
   }
 };
 
-const fetchDeltaRates = async () => {
+const fetchCoinSwitchRates = async () => {
   try {
-    const res = await fetch(DELTA_API);
+    const method = "GET";
+    const epoch = Date.now().toString();
+    const signature = generateSignature(method, COINSWITCH_API_URL, null, epoch);
+
+    const headers = {
+        "Content-Type": "application/json",
+        "X-AUTH-KEY": COINSWITCH_API_KEY,
+        "X-AUTH-SIGNATURE": signature,
+        "X-AUTH-EPOCH": epoch
+    };
+
+    // Use Proxy URL regarding vite.config.js to bypass CORS
+    // https://coinswitch.co/... -> /api/coinswitch/...
+    const proxyUrl = COINSWITCH_API_URL.replace('https://coinswitch.co', '/api/coinswitch');
+    
+    const res = await fetch(proxyUrl, {
+        method: method,
+        headers: headers
+    });
+    
+    if (!res.ok) {
+        console.error("CoinSwitch API Error", res.status, res.statusText);
+        return {};
+    }
+
     const data = await res.json();
     const rates = {};
-    if (data.result) {
-      data.result.forEach(item => {
-        if (item.contract_type === 'perpetual_futures' && item.symbol.endsWith('USDT')) {
-           const symbol = item.symbol.replace('USDT', '');
-           rates[symbol] = {
-             rate: parseFloat(item.funding_rate || 0),
-             // Delta might not send next time in this endpoint, but we focus on rate
-           };
-        }
-      });
+    
+    // Parse CoinSwitch structure
+    // Expecting: { data: { "BTC/USDT": { ... }, ... } } OR { data: [ { symbol: ... } ] }
+    // "all-pairs" usually returns a map or list.
+    // We'll handle both map and list to be safe.
+    
+    let items = [];
+    if (Array.isArray(data.data)) {
+        items = data.data;
+    } else if (typeof data.data === 'object' && data.data !== null) {
+        // If it's a map (Symbol -> Data), convert to array
+        items = Object.entries(data.data).map(([k, v]) => ({ ...v, symbol: k }));
     }
+    
+    items.forEach(item => {
+        // Normalize symbol: "BTC/USDT" -> "BTC"
+        const rawSymbol = item.symbol || item.pair; 
+        if (rawSymbol && rawSymbol.includes('USDT')) {
+             const symbol = rawSymbol.replace('/USDT', '').replace('USDT', '');
+             
+             // Look for funding rate parameter
+             // Might be camelCase or snake_case
+             const rate = item.funding_rate || item.lastFundingRate || 0;
+             
+             rates[symbol] = {
+                 rate: parseFloat(rate),
+                 markPrice: parseFloat(item.mark_price || item.last_price || 0)
+             };
+        }
+    });
+
     return rates;
   } catch (error) {
-    console.error("Delta Fetch Error", error);
+    console.error("CoinSwitch Fetch Error", error);
     return {};
   }
 };
+
 
 // --- Main Component ---
 
@@ -71,45 +136,52 @@ function App() {
   const [telegramConfig, setTelegramConfig] = useState({ token: '', chatId: '' });
 
   // --- WebSocket Logic ---
-  const [connectionStatus, setConnectionStatus] = useState({ binance: 'disconnected', delta: 'disconnected' });
+  const [connectionStatus, setConnectionStatus] = useState({ binance: 'disconnected', coinswitch: 'disconnected' });
 
   // detailed map to keep store of latest data
-  // symbol -> { binanceRate, deltaRate, ... }
+  // symbol -> { binanceRate, coinSwitchRate, ... }
   const dataRef = useRef({});
 
   const updateTableData = () => {
-     // Convert map to array
-     const merged = Object.values(dataRef.current).map(item => {
+     // Allow rows if we have a symbol key (populated by initial fetch or WS)
+     const merged = Object.values(dataRef.current)
+        .map(item => {
         let spread = 0;
         let apr = 0;
-        // Default to 0 if undefined to prevent NaN
         const binanceRateVal = item.binanceRate !== undefined ? item.binanceRate : 0;
-        const deltaRateVal = item.deltaRate !== undefined ? item.deltaRate : 0;
+        const coinSwitchRateVal = item.coinSwitchRate !== undefined ? item.coinSwitchRate : 0;
+        const markPrice = item.markPrice || 0;
 
-        if (item.binanceRate !== undefined && item.deltaRate !== undefined) {
-            const binanceRatePct = binanceRateVal * 100; // Binance is decimal
-            const deltaRatePct = deltaRateVal;           // Delta is percentage (verified)
-            
-            // Spread is the absolute difference in percentage
-            spread = Math.abs(binanceRatePct - deltaRatePct);
-            
-            // APR = Spread * 3 (8h periods/day) * 365
-            apr = spread * 3 * 365;
+        // Calculate spread if we have rates (or default to 0)
+        // Ensure we display rows even if one side is missing to help debug 'missing data'
+        
+        const binanceRatePct = binanceRateVal * 100;
+        const coinSwitchRatePct = coinSwitchRateVal * 100; // Treat as decimal like Binance
+        
+        // Only calculate spread if we have both
+        if (item.binanceRate !== undefined && item.coinSwitchRate !== undefined) {
+             spread = Math.abs(binanceRatePct - coinSwitchRatePct);
+             apr = spread * 3 * 365;
         }
         
         return { 
             ...item, 
             spread, 
-            apr, 
-            binanceRate: binanceRateVal * 100, // Store as percentage for display
-            deltaRate: deltaRateVal,           // Store as percentage for display
+            apr,
+            markPrice,
+            binanceRate: binanceRateVal * 100, 
+            coinSwitchRate: coinSwitchRateVal * 100, 
             binanceRateRaw: binanceRateVal, 
-            deltaRateRaw: deltaRateVal 
+            coinSwitchRateRaw: coinSwitchRateVal 
         };
-     });
+     })
+     // Filter out incomplete rows ONLY if user wants strict mode (optional), 
+     // but for now let's just filter out completely empty ones
+     .filter(item => item.symbol);
+     
      setData(merged);
      setLastUpdated(new Date());
-     checkAndSendAlerts(merged); // Check alerts on update
+     checkAndSendAlerts(merged);
   };
    // ... keep existing useEffects ...
 
@@ -126,7 +198,7 @@ function App() {
     if (!isLive) return; // Don't connect if Live Mode is OFF
 
     let binanceWS = null;
-    let deltaWS = null;
+    // let coinSwitchWS = null; // Placeholder
 
     const connectSockets = () => {
         // ... (existing WS connection logic)
@@ -144,59 +216,21 @@ function App() {
                             const symbol = update.s.replace('USDT', '');
                             if (!dataRef.current[symbol]) { dataRef.current[symbol] = { symbol }; }
                             dataRef.current[symbol].binanceRate = parseFloat(update.r);
+                            if (update.p) dataRef.current[symbol].markPrice = parseFloat(update.p);
                         }
                     });
                 }
             } catch (e) { }
         };
-
-        // 2. Delta
-        deltaWS = new WebSocket('wss://socket.delta.exchange');
-        deltaWS.onopen = () => {
-            setConnectionStatus(prev => ({ ...prev, delta: 'connected' }));
-            const subMsg = { "type": "subscribe", "payload": { "channels": [ { "name": "funding_rate", "symbols": ["all"] } ] } };
-            if (deltaWS.readyState === WebSocket.OPEN) { deltaWS.send(JSON.stringify(subMsg)); }
-        };
-        deltaWS.onclose = () => setConnectionStatus(prev => ({ ...prev, delta: 'disconnected' }));
-        deltaWS.onerror = (err) => { if (deltaWS && deltaWS.readyState !== WebSocket.CLOSED) {} };
-        deltaWS.onmessage = (event) => {
-             try {
-                const msg = JSON.parse(event.data);
-                // Delta WS messages vary. For channel updates:
-                // { symbol: "BTCUSDT", funding_rate: "0.0001", type: "funding_rate_updates" } 
-                // OR sometimes inside a data array?
-                
-                // Broad check for funding rate in root or data
-                let symbol = null;
-                let rate = null;
-
-                if (msg.symbol && msg.funding_rate !== undefined) {
-                    symbol = msg.symbol;
-                    rate = msg.funding_rate;
-                } else if (msg.type === 'funding_rate_updates' && msg.data) {
-                    // Possible structure handling
-                    // But usually for "funding_rate" channel it sends direct objects per symbol or standard ticker format
-                }
-
-                if (symbol && rate !== null) {
-                     const s = symbol.replace('USDT', '');
-                     // Only update if we are tracking this symbol
-                     if (!dataRef.current[s]) { 
-                         // Optional: Add new symbol if found? For now stick to existing or create new
-                         dataRef.current[s] = { symbol: s }; 
-                     }
-                     dataRef.current[s].deltaRate = parseFloat(rate);
-                }
-            } catch (e) { }
-        };
+    // 2. CoinSwitch - No Public WebSocket known yet
+    // Placeholder for future implementation
     };
 
     connectSockets();
 
     return () => {
         if (binanceWS) { binanceWS.close(); }
-        if (deltaWS) { deltaWS.close(); }
-        setConnectionStatus({ binance: 'disconnected', delta: 'disconnected' });
+        setConnectionStatus({ binance: 'disconnected', coinswitch: 'disconnected' });
     };
   }, [isLive]); // Re-run when toggle changes
 
@@ -208,15 +242,17 @@ function App() {
         // Don't show global loading spinner on background refreshes
         // setLoading(true); 
         try {
-            const [b, d] = await Promise.all([fetchBinanceRates(), fetchDeltaRates()]);
+            const [b, c] = await Promise.all([fetchBinanceRates(), fetchCoinSwitchRates()]);
             
             Object.keys(b).forEach(s => {
                 if(!dataRef.current[s]) dataRef.current[s] = { symbol: s };
                 dataRef.current[s].binanceRate = b[s].rate;
+                dataRef.current[s].markPrice = b[s].markPrice;
             });
-            Object.keys(d).forEach(s => {
+            Object.keys(c).forEach(s => {
                 if(!dataRef.current[s]) dataRef.current[s] = { symbol: s };
-                dataRef.current[s].deltaRate = d[s].rate;
+                dataRef.current[s].coinSwitchRate = c[s].rate;
+                if (c[s].markPrice) dataRef.current[s].markPrice = c[s].markPrice; // Use CS price if available? Mostly stick to Binance
             });
             
             // If this was the first load, turn off loading
@@ -276,7 +312,7 @@ function App() {
         `🪙 *${item.symbol}*\n` +
         `📉 Spread: ${item.spread.toFixed(4)}%\n` +
         `🔶 Binance: ${item.binanceRate.toFixed(4)}%\n` +
-        `💠 Delta: ${item.deltaRate.toFixed(4)}%`
+        `💠 CoinSwitch: ${item.coinSwitchRate.toFixed(4)}%`
       ).join('\n\n');
 
     try {
@@ -306,7 +342,7 @@ function App() {
               Funding Arb Bot
             </h1>
             <p className="text-muted-foreground mt-1">
-              Real-time funding rate arbitrage monitor (Binance vs Delta)
+              Real-time funding rate arbitrage monitor (Binance vs CoinSwitch)
             </p>
           </div>
           
@@ -323,8 +359,8 @@ function App() {
                  <span className={cn("text-[10px] px-1 rounded border", connectionStatus.binance === 'connected' ? "bg-green-500/20 border-green-500 text-green-500" : "bg-red-500/20 border-red-500 text-red-500")}>
                     BN: {connectionStatus.binance === 'connected' ? 'LIVE' : 'OFF'}
                  </span>
-                 <span className={cn("text-[10px] px-1 rounded border", connectionStatus.delta === 'connected' ? "bg-green-500/20 border-green-500 text-green-500" : "bg-red-500/20 border-red-500 text-red-500")}>
-                    DL: {connectionStatus.delta === 'connected' ? 'LIVE' : 'OFF'}
+                 <span className={cn("text-[10px] px-1 rounded border", connectionStatus.coinswitch === 'connected' ? "bg-green-500/20 border-green-500 text-green-500" : "bg-red-500/20 border-red-500 text-red-500")}>
+                    CS: {connectionStatus.coinswitch === 'connected' ? 'LIVE' : 'OFF'}
                  </span>
             </div>
             <Button size="sm" variant="outline" onClick={updateTableData} disabled={loading}>
@@ -413,11 +449,12 @@ function App() {
               <TableHeader>
                 <TableRow>
                   <TableHead className="w-[100px] font-bold text-primary sticky left-0 z-20 bg-background shadow-[1px_0_5px_rgba(0,0,0,0.1)]">Symbol</TableHead>
+                  <TableHead className="min-w-[100px]">Mark Price</TableHead>
                   <TableHead onClick={() => requestSort('binanceRate')} className="cursor-pointer hover:text-primary transition-colors whitespace-nowrap min-w-[120px]">
                      Binance Rate % <ArrowUpDown className="inline h-3 w-3 ml-1"/>
                   </TableHead>
-                  <TableHead onClick={() => requestSort('deltaRate')} className="cursor-pointer hover:text-primary transition-colors whitespace-nowrap min-w-[120px]">
-                     Delta Rate % <ArrowUpDown className="inline h-3 w-3 ml-1"/>
+                  <TableHead onClick={() => requestSort('coinSwitchRate')} className="cursor-pointer hover:text-primary transition-colors whitespace-nowrap min-w-[120px]">
+                     CoinSwitch Rate % <ArrowUpDown className="inline h-3 w-3 ml-1"/>
                   </TableHead>
                   <TableHead onClick={() => requestSort('spread')} className="cursor-pointer hover:text-primary transition-colors whitespace-nowrap min-w-[120px]">
                      Spread % <ArrowUpDown className="inline h-3 w-3 ml-1"/>
@@ -431,7 +468,7 @@ function App() {
               <TableBody>
                 {loading ? (
                   <TableRow>
-                    <TableCell colSpan={6} className="h-24 text-center">
+                    <TableCell colSpan={7} className="h-24 text-center">
                       <div className="flex justify-center items-center gap-2">
                         <RefreshCw className="h-5 w-5 animate-spin text-muted-foreground" />
                         <span className="text-muted-foreground">Fetching market data...</span>
@@ -440,7 +477,7 @@ function App() {
                   </TableRow>
                 ) : sortedData.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={6} className="h-24 text-center text-muted-foreground">
+                    <TableCell colSpan={7} className="h-24 text-center text-muted-foreground">
                       No arbitrage opportunities found matching criteria.
                     </TableCell>
                   </TableRow>
@@ -459,14 +496,17 @@ function App() {
                               e.target.src = `https://ui-avatars.com/api/?name=${item.symbol}&background=F3BA2F&color=fff&size=64&font-size=0.4&bold=true`; // Binance yellow fallback
                             }}
                           />
-                          <span className="text-foreground">{item.symbol}</span>
+                        <span className="text-foreground">{item.symbol}</span>
                         </div>
+                      </TableCell>
+                       <TableCell className="font-mono text-muted-foreground">
+                        ${item.markPrice ? item.markPrice.toFixed(4) : '0.0000'}
                       </TableCell>
                       <TableCell className={cn("font-medium", item.binanceRate > 0 ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400")}>
                         {item.binanceRate.toFixed(4)}%
                       </TableCell>
-                      <TableCell className={cn("font-medium", item.deltaRate > 0 ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400")}>
-                         {item.deltaRate.toFixed(4)}%
+                      <TableCell className={cn("font-medium", item.coinSwitchRate > 0 ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400")}>
+                         {item.coinSwitchRate ? item.coinSwitchRate.toFixed(4) : '0.0000'}%
                       </TableCell>
                       <TableCell className="font-mono font-bold text-blue-600 dark:text-blue-400">
                          {item.spread.toFixed(4)}%
@@ -481,9 +521,9 @@ function App() {
                                <img src="https://bin.bnbstatic.com/static/images/common/favicon.ico" alt="Binance" className="w-4 h-4" />
                              </a>
                           </Button>
-                          <Button size="icon" variant="outline" className="h-8 w-8 p-0 border-purple-500/50 hover:bg-purple-500/10" asChild title="Delta Exchange"> 
-                             <a href={`https://www.delta.exchange/app/trade/${item.symbol}USDT`} target="_blank" rel="noopener noreferrer">
-                               <img src="https://www.delta.exchange/favicon.ico" alt="Delta" className="w-4 h-4" />
+                          <Button size="icon" variant="outline" className="h-8 w-8 p-0 border-purple-500/50 hover:bg-purple-500/10" asChild title="CoinSwitch"> 
+                             <a href={`https://coinswitch.co/pro/spot/${item.symbol}-USDT`} target="_blank" rel="noopener noreferrer">
+                               <img src="https://coinswitch.co/favicon.ico" alt="CS" className="w-4 h-4" />
                              </a>
                           </Button>
                         </div>

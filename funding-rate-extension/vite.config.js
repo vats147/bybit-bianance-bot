@@ -22,10 +22,10 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api\/binance/, '')
       },
-      '/api/delta': {
-        target: 'https://api.delta.exchange',
+      '/api/coinswitch': {
+        target: 'https://coinswitch.co',
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api\/delta/, '')
+        rewrite: (path) => path.replace(/^\/api\/coinswitch/, '')
       }
     }
   }
