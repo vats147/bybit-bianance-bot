@@ -501,8 +501,8 @@ async def get_metadata():
         bybit_url = "https://api.bybit.com/v5/market/instruments-info?category=linear"
         bybit_task = loop.run_in_executor(None, requests.get, bybit_url)
         
-        # 2. Fetch Binance Intervals (Mainnet usually correct for metadata)
-        binance_url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
+        # 2. Fetch Binance Intervals (Use fundingInfo for accurate hours)
+        binance_url = "https://fapi.binance.com/fapi/v1/fundingInfo"
         binance_task = loop.run_in_executor(None, requests.get, binance_url)
         
         r_bybit, r_binance = await asyncio.gather(bybit_task, binance_task)
@@ -520,18 +520,16 @@ async def get_metadata():
                     interval_min = int(item.get('fundingInterval', 480))
                     metadata[sym] = { "bybit": interval_min // 60 } # Convert to hours
         
-        # Process Binance
+        # Process Binance (fundingInfo returns list of objects)
         if r_binance.status_code == 200:
             d = r_binance.json()
-            # exchangeInfo structure: { symbols: [ ... ] }
-            if 'symbols' in d:
-                for item in d['symbols']:
-                    if item['contractType'] != 'PERPETUAL': continue
+            # d is a list of objects: [ { "symbol": "BTCUSDT", "fundingIntervalHours": 8, ... }, ... ]
+            if isinstance(d, list):
+                for item in d:
                     if not item['symbol'].endswith("USDT"): continue
                     sym = item['symbol'].replace("USDT", "")
                     
-                    # Default to 8h if not found, but recent API has 'fundingIntervalHours'
-                    interval = 8 
+                    interval = int(item.get('fundingIntervalHours', 8))
                     
                     if sym not in metadata: metadata[sym] = {}
                     metadata[sym]["binance"] = interval

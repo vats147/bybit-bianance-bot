@@ -177,21 +177,28 @@ function App() {
     return { primary, backup };
   };
 
-  const [intervalMap, setIntervalMap] = useState({});
+  const intervalMapRef = useRef({}); // Use Ref to avoid stale closure in setInterval
+  const [metadataCount, setMetadataCount] = useState(0);
 
   useEffect(() => {
-    // Fetch Interval Metadata
+    // Fetch Interval Metadata with Retry/Polling
     const fetchMetadata = async () => {
       try {
         const { primary } = getBackendUrl();
-        const res = await fetch(`${primary}/api/metadata`);
+        // Add cache busting
+        const res = await fetch(`${primary}/api/metadata?_t=${Date.now()}`);
         if (res.ok) {
           const map = await res.json();
-          setIntervalMap(map);
+          intervalMapRef.current = map; // Update Ref
+          setMetadataCount(Object.keys(map).length);
         }
       } catch (e) { console.error("Metadata fetch failed", e); }
     };
+
     fetchMetadata();
+    const pollId = setInterval(fetchMetadata, 10000); // Poll every 10s to ensure we get data
+
+    return () => clearInterval(pollId);
   }, []);
 
   const updateTableData = () => {
@@ -206,9 +213,6 @@ function App() {
         const markPrice = item.markPrice || 0;
         const nextFundingTime = item.nextFundingTime || 0;
 
-        // Calculate spread if we have rates (or default to 0)
-        // Ensure we display rows even if one side is missing to help debug 'missing data'
-
         const binanceRatePct = binanceRateVal * 100;
         const bybitRatePct = bybitRateVal * 100; // Treat as decimal like Binance
 
@@ -219,8 +223,8 @@ function App() {
           apr = spread * 3 * 365;
         }
 
-        // Interval Lookup
-        const intervals = intervalMap[item.symbol] || {};
+        // Interval Lookup via Ref
+        const intervals = intervalMapRef.current[item.symbol] || {};
         const bybitInt = intervals.bybit || 8;
         const binanceInt = intervals.binance || 8;
 
@@ -540,6 +544,9 @@ function App() {
               <div className="flex items-center gap-2 ml-2">
                 <span className="text-sm font-medium">Live Mode</span>
                 <Switch checked={isLive} onCheckedChange={setIsLive} />
+                <span className={`text-[10px] px-1 rounded border ml-2 ${metadataCount > 0 ? "bg-green-500/10 text-green-500 border-green-500/50" : "bg-red-500/10 text-red-500 border-red-500/50"}`}>
+                  Meta: {metadataCount}
+                </span>
               </div>
               <div className="flex items-center gap-2">
                 <span className="text-xs text-muted-foreground mr-2">
@@ -651,7 +658,7 @@ function App() {
                     <TableRow>
                       <TableHead className="w-[100px] font-bold text-primary sticky left-0 z-20 bg-background shadow-[1px_0_5px_rgba(0,0,0,0.1)]">Symbol</TableHead>
                       <TableHead className="min-w-[100px]">Mark Price</TableHead>
-                      <TableHead className="min-w-[120px]">Funding (Interval)</TableHead>
+                      <TableHead className="min-w-[120px]">Funding / Intervals</TableHead>
                       <TableHead className="text-right cursor-pointer hover:text-primary transition-colors hover:bg-muted/50" onClick={() => requestSort('bybitRateRaw')}>
                         Bybit (Int.) {sortConfig.key === 'bybitRateRaw' && (sortConfig.direction === 'ascending' ? '↑' : '↓')}
                       </TableHead>
@@ -711,9 +718,15 @@ function App() {
                               if (diff <= 0) return 'Now';
                               const h = Math.floor(diff / (1000 * 60 * 60));
                               const m = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
-                              const roundedH = Math.round(diff / (1000 * 60 * 60));
-                              const approx = roundedH === 0 ? '<1h' : `~${roundedH}h`;
-                              return `${h}h ${m}m (${approx})`;
+
+                              return (
+                                <div className="flex flex-col">
+                                  <span className="text-xs">{h}h {m}m</span>
+                                  <span className="text-[10px] text-muted-foreground font-semibold">
+                                    Bin: {item.intervals?.binance}h / Byb: {item.intervals?.bybit}h
+                                  </span>
+                                </div>
+                              );
                             })()}
                           </TableCell>
                           <TableCell className={cn("font-medium", item.binanceRate > 0 ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400")}>

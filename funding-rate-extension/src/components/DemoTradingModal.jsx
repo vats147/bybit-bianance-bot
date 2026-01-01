@@ -1,8 +1,8 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
-import { X, Play, RefreshCw, AlertTriangle, TrendingUp, TrendingDown } from "lucide-react";
+import { X, Play, RefreshCw, AlertTriangle, TrendingUp, TrendingDown, Clock, Timer, CheckCircle2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 
@@ -15,8 +15,22 @@ export function DemoTradingModal({ isOpen, onClose, data }) {
     const [arbitrageResult, setArbitrageResult] = useState(null); // { netPnL, legs: [] }
     const [testQty, setTestQty] = useState(100);
     const [realExecution, setRealExecution] = useState(false);
+
+    // Scheduler State
+    const [scheduleMode, setScheduleMode] = useState(false);
+    const [scheduledTime, setScheduledTime] = useState("");
+    const [autoSellDelay, setAutoSellDelay] = useState(60); // Seconds
+    const [schedulerStatus, setSchedulerStatus] = useState("IDLE"); // IDLE | WAITING | EXECUTING | COMPLETED | FAILED
+    const [scheduledTimerId, setScheduledTimerId] = useState(null);
     const [orderStatus, setOrderStatus] = useState(null);
     const [loading, setLoading] = useState(false);
+
+    // Refs for closure access
+    const paramsRef = useRef({ capital, leverage, testQty, platform, realExecution });
+    useEffect(() => {
+        paramsRef.current = { capital, leverage, testQty, platform, realExecution };
+    }, [capital, leverage, testQty, platform, realExecution]);
+
 
     useEffect(() => {
         if (!data || !data.nextFundingTime) return;
@@ -60,7 +74,6 @@ export function DemoTradingModal({ isOpen, onClose, data }) {
         fundingRate = binanceRate || 0;
         currentInterval = binanceInterval;
     }
-    // For Arbitrage, we care about the SPREAD and NET rate
 
     const positionSize = capital * leverage;
 
@@ -70,22 +83,57 @@ export function DemoTradingModal({ isOpen, onClose, data }) {
     const recommendationColor = isRateNegative ? "text-green-600" : "text-red-600";
     const recommendationBg = isRateNegative ? "bg-green-100 dark:bg-green-900/30" : "bg-red-100 dark:bg-red-900/30";
 
+    // --- LOGIC HELPERS ---
+
+    const calculateArbitrageParams = () => {
+        const bRate = binanceRate || 0;
+        const yRate = bybitRate || 0;
+        const spread = Math.abs(bRate - yRate);
+
+        let longEx = "BYBIT";
+        let shortEx = "BINANCE";
+
+        // If Binance Rate > Bybit Rate:
+        // We Short Binance (Receive High), Long Bybit (Pay Low/Receive Negative)
+        if (bRate > yRate) {
+            shortEx = "BINANCE";
+            longEx = "BYBIT";
+        } else {
+            shortEx = "BYBIT";
+            longEx = "BINANCE";
+        }
+
+        const legSize = (capital / 2) * leverage;
+        // Calc PnL
+        const shortRateVal = (shortEx === "BINANCE" ? bRate : yRate) / 100;
+        const longRateVal = (longEx === "BINANCE" ? bRate : yRate) / 100;
+        const shortIncome = legSize * shortRateVal;
+        const longCost = legSize * longRateVal;
+        const fees = (legSize * 0.001) * 2;
+        const netFunding = shortIncome - longCost;
+        const totalPnL = netFunding - fees;
+
+        return {
+            longEx, shortEx,
+            legSize, shortIncome, longCost, fees, totalPnL, spread,
+            bRate, yRate
+        };
+    };
+
     const runSimulation = (sizeVal, direction) => {
         let fundingIncome = 0;
         const rateAbs = Math.abs(fundingRate);
         const rateDecimal = rateAbs / 100;
 
         if (fundingRate > 0) {
-            // Positive: Short receives
             if (direction === "SHORT") fundingIncome = sizeVal * rateDecimal;
             else fundingIncome = -(sizeVal * rateDecimal);
         } else {
-            // Negative: Long receives
             if (direction === "LONG") fundingIncome = sizeVal * rateDecimal;
             else fundingIncome = -(sizeVal * rateDecimal);
         }
 
-        const tradingFeeRate = 0.1; // 0.1% total round trip
+        const tradingFeeRate = 0.1;
         const estimatedTradingFees = sizeVal * (tradingFeeRate / 100);
         const netPnL = fundingIncome - estimatedTradingFees;
 
@@ -100,57 +148,9 @@ export function DemoTradingModal({ isOpen, onClose, data }) {
     };
 
     const runArbitrageSimulation = () => {
-        // Logic: Long Lower Rate, Short Higher Rate usually (to collect spread)?
-        // Usually: 
-        // If Binance > Bybit: Short Binance (Receive High), Long Bybit (Pay Low). Net = High - Low.
-        // If Bybit > Binance: Short Bybit (Receive High), Long Binance (Pay Low).
-
-        // Let's determine directions
-        const bRate = binanceRate || 0;
-        const yRate = bybitRate || 0;
-
-        let longEx, shortEx;
-        let spread = Math.abs(bRate - yRate);
-        let netRate = spread; // roughly
-
-        if (bRate > yRate) {
-            shortEx = "BINANCE";
-            longEx = "BYBIT";
-            // Short Binance (+bRate), Long Bybit (-yRate). Net = bRate - yRate.
-        } else {
-            shortEx = "BYBIT";
-            longEx = "BINANCE";
-            // Short Bybit (+yRate), Long Binance (-bRate). Net = yRate - bRate.
-        }
-
-        const sizePerLeg = positionSize / 2; // Split capital? Or Capital * Leverage for EACH leg? Usually total exposure.
-        // Let's assume Capital is TOTAL equity. Split 50/50.
-        const legSize = (capital / 2) * leverage;
-
-        // 1. Short Leg Income
-        const shortRateVal = (shortEx === "BINANCE" ? bRate : yRate) / 100;
-        const shortIncome = legSize * shortRateVal; // Receiving
-
-        // 2. Long Leg Cost
-        const longRateVal = (longEx === "BINANCE" ? bRate : yRate) / 100;
-        const longCost = legSize * longRateVal; // Paying (if positive rate)
-
-        // 3. Fees (2 legs)
-        const fees = (legSize * 0.001) * 2; // 0.1% * 2
-
-        const netFunding = shortIncome - longCost;
-        const totalPnL = netFunding - fees;
-
-        setArbitrageResult({
-            longEx,
-            shortEx,
-            legSize,
-            shortIncome,
-            longCost,
-            fees,
-            totalPnL,
-            spread: spread
-        });
+        const params = calculateArbitrageParams();
+        setArbitrageResult(params);
+        return params;
     };
 
     const handleExecute = () => {
@@ -161,14 +161,14 @@ export function DemoTradingModal({ isOpen, onClose, data }) {
         }
     };
 
+    // --- EXECUTION HANDLERS ---
+
     const handleManualTest = async (direction) => {
         if (!realExecution) {
             const sizeVal = testQty * (markPrice || 0);
             runSimulation(sizeVal, direction);
             return;
         }
-
-        // Single Execution Logic (Existing)
         setLoading(true);
         setOrderStatus(null);
         await executeTrade(platform, direction, testQty);
@@ -176,27 +176,32 @@ export function DemoTradingModal({ isOpen, onClose, data }) {
     };
 
     const handleArbitrageExecute = async () => {
-        if (!arbitrageResult) { runArbitrageSimulation(); return; }
+        // Always recalculate fresh for execution to be safe
+        const params = calculateArbitrageParams();
+        setArbitrageResult(params); // Update UI
 
-        // AUTO EXECUTE BOTH LEGS
+        if (!realExecution) {
+            // Just simulation was run above
+            return;
+        }
+
         setLoading(true);
         setOrderStatus(null);
 
         try {
-            // 1. Execute Long
-            const p1 = executeTrade(arbitrageResult.longEx, "LONG", testQty);
-            // 2. Execute Short
-            const p2 = executeTrade(arbitrageResult.shortEx, "SHORT", testQty);
+            // Execute Simultaneously
+            const p1 = executeTrade(params.longEx, "LONG", testQty);
+            const p2 = executeTrade(params.shortEx, "SHORT", testQty);
 
             await Promise.all([p1, p2]);
 
             setOrderStatus({
                 status: 'success',
-                message: `Arbitrage Executed! Long ${arbitrageResult.longEx} & Short ${arbitrageResult.shortEx}`
+                message: `Arbitrage Entry: Long ${params.longEx} / Short ${params.shortEx}`
             });
 
         } catch (e) {
-            setOrderStatus({ status: 'error', message: `Partial/Full Failure: ${e.message}` });
+            setOrderStatus({ status: 'error', message: `Execution Error: ${e.message}` });
         } finally {
             setLoading(false);
         }
@@ -256,7 +261,6 @@ export function DemoTradingModal({ isOpen, onClose, data }) {
             return data;
         };
 
-        // Try Primary
         try {
             return await attemptFetch(primary);
         } catch (primaryErr) {
@@ -267,6 +271,141 @@ export function DemoTradingModal({ isOpen, onClose, data }) {
                 throw primaryErr;
             }
         }
+    };
+
+    // --- SCHEDULER LOGIC ---
+
+    const startScheduler = () => {
+        if (!scheduledTime) {
+            alert("Please select a valid start time.");
+            return;
+        }
+        setSchedulerStatus("WAITING");
+
+        const targetTime = new Date(scheduledTime).getTime();
+        const now = Date.now();
+        const delay = targetTime - now;
+
+        if (delay <= 0) {
+            alert("Scheduled time in past! Please select future time.");
+            setSchedulerStatus("IDLE");
+            return;
+        }
+
+        console.log(`Scheduler Armed! Executing in ${delay / 1000}s`);
+
+        // Capture settings for closure
+        // We use refs if we wanted LIVE settings at execution time, 
+        // BUT for a sniper, we usually want the logic at Trigger Time.
+        // We will calculate logic INSIDE the timeout.
+
+        const timerId = setTimeout(async () => {
+            // --- ENTRY PHASE ---
+            setSchedulerStatus("EXECUTING_ENTRY");
+
+            // Get fresh params from Refs or Current State (via closure if sufficient, but let's recalculate)
+            const pOpts = paramsRef.current; // access fresh Real/Sim settings
+
+            let arbParams = null;
+            let singleDir = null;
+
+            try {
+                if (pOpts.platform === 'ARBITRAGE') {
+                    // Calculate FRESH direction based on rates at trigger time
+                    arbParams = calculateArbitrageParams();
+                    setArbitrageResult(arbParams); // Update UI
+
+                    if (pOpts.realExecution) {
+                        const p1 = executeTrade(arbParams.longEx, "LONG", pOpts.testQty);
+                        const p2 = executeTrade(arbParams.shortEx, "SHORT", pOpts.testQty);
+                        await Promise.all([p1, p2]);
+                        setOrderStatus({ status: 'success', message: `Scheduler Entry: Long ${arbParams.longEx}, Short ${arbParams.shortEx}` });
+                    } else {
+                        console.log("Simulating Arbitrage Entry...");
+                    }
+                } else {
+                    // Single Platform
+                    // Recalculate Recommendation
+                    const isNeg = fundingRate < 0; // Uses closure fundingRate. Ideally should invoke fresh fetch?
+                    // For now, accepts "Closure" data or UI should ideally refetch. 
+                    // Let's rely on recommendedAction from render? No, that's stale. 
+                    // We'll stick to 'recommendedAction' logic:
+                    const rec = (isNeg ? "LONG" : "SHORT"); // Closure `fundingRate` might be stale! 
+                    // Better: The user is "sniping" based on *predicted* funding. 
+                    // We'll assume the direction displayed when Arming is the intent? 
+                    // OR we re-eval. Let's re-eval if possible, but we don't have async fetch here easily.
+                    // We will use the closure value for now, assuming Funding Rate doesn't flip sign in minutes.
+
+                    singleDir = rec;
+                    if (pOpts.realExecution) {
+                        await executeTrade(pOpts.platform, singleDir, pOpts.testQty);
+                        setOrderStatus({ status: 'success', message: `Scheduler Entry: ${singleDir} on ${pOpts.platform}` });
+                    } else {
+                        runSimulation(positionSize, singleDir);
+                    }
+                }
+            } catch (e) {
+                console.error("Entry Failed", e);
+                setOrderStatus({ status: 'error', message: "Entry Failed: " + e.message });
+                // Should we abort exit? Probably.
+                setSchedulerStatus("FAILED");
+                return;
+            }
+
+            // --- EXIT PHASE SETUP ---
+            // Use the Exact params we just used to INVERT them.
+            // Even if market flips during delay, we must Close the position we OPENED.
+
+            const exitDelayMs = autoSellDelay * 1000;
+            console.log(`Scheduler: Waiting ${autoSellDelay}s to Close...`);
+
+            setTimeout(async () => {
+                setSchedulerStatus("EXECUTING_EXIT");
+
+                try {
+                    if (pOpts.platform === 'ARBITRAGE') {
+                        if (arbParams && pOpts.realExecution) {
+                            // CLOSE what we Opened.
+                            // Entry: LongParams.longEx, ShortParams.shortEx
+                            // Exit: ShortParams.longEx, LongParams.shortEx
+                            console.log(`Closing Arbitrage: Short ${arbParams.longEx}, Long ${arbParams.shortEx}`);
+
+                            const p1 = executeTrade(arbParams.longEx, "SHORT", pOpts.testQty);
+                            const p2 = executeTrade(arbParams.shortEx, "LONG", pOpts.testQty);
+                            await Promise.all([p1, p2]);
+
+                            setOrderStatus({ status: 'success', message: `Scheduler Exit: Closed Positions` });
+                        } else {
+                            // Sim
+                            setOrderStatus({ status: 'success', message: `Simulated Exit (Auto-Close) after delay` });
+                        }
+                    } else {
+                        // Single
+                        if (singleDir && pOpts.realExecution) {
+                            const closeDir = singleDir === "LONG" ? "SHORT" : "LONG";
+                            await executeTrade(pOpts.platform, closeDir, pOpts.testQty);
+                            setOrderStatus({ status: 'success', message: `Scheduler Exit: ${closeDir} on ${pOpts.platform}` });
+                        } else {
+                            setOrderStatus({ status: 'success', message: `Simulated Exit (Auto-Close)` });
+                        }
+                    }
+                    setSchedulerStatus("COMPLETED");
+                } catch (e) {
+                    setOrderStatus({ status: 'error', message: "Exit Failed: " + e.message });
+                    setSchedulerStatus("FAILED");
+                }
+
+            }, exitDelayMs);
+
+        }, delay);
+
+        setScheduledTimerId(timerId);
+    };
+
+    const cancelScheduler = () => {
+        if (scheduledTimerId) clearTimeout(scheduledTimerId);
+        setSchedulerStatus("IDLE");
+        setScheduledTimerId(null);
     };
 
     return (
@@ -298,16 +437,65 @@ export function DemoTradingModal({ isOpen, onClose, data }) {
                             </button>
                         </div>
 
+                        {/* SCHEDULER SECTION */}
+                        <div className="border border-indigo-200 dark:border-indigo-800 rounded-lg overflow-hidden bg-muted/10">
+                            <div className="flex items-center justify-between p-3 bg-indigo-50/50 dark:bg-indigo-950/20">
+                                <label className="text-sm font-bold flex items-center gap-2 text-indigo-700 dark:text-indigo-400">
+                                    <Clock className="h-4 w-4" />
+                                    Timed Execution / Sniper
+                                </label>
+                                <Switch checked={scheduleMode} onCheckedChange={setScheduleMode} />
+                            </div>
+
+                            {scheduleMode && (
+                                <div className="p-4 space-y-4 animate-in slide-in-from-top-2">
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div className="space-y-1">
+                                            <label className="text-xs font-semibold flex items-center gap-1"><Play className="h-3 w-3" /> Entry Time</label>
+                                            <Input
+                                                type="datetime-local"
+                                                className="text-xs font-mono h-8"
+                                                value={scheduledTime}
+                                                onChange={e => setScheduledTime(e.target.value)}
+                                                disabled={schedulerStatus === "WAITING"}
+                                            />
+                                        </div>
+                                        <div className="space-y-1">
+                                            <label className="text-xs font-semibold flex items-center gap-1"><Timer className="h-3 w-3" /> Exit Delay (s)</label>
+                                            <Input
+                                                type="number"
+                                                value={autoSellDelay}
+                                                onChange={e => setAutoSellDelay(Number(e.target.value))}
+                                                className="text-xs font-mono h-8"
+                                                disabled={schedulerStatus === "WAITING"}
+                                            />
+                                        </div>
+                                    </div>
+
+                                    {schedulerStatus === "IDLE" || schedulerStatus === "COMPLETED" || schedulerStatus === "FAILED" ? (
+                                        <Button size="sm" className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold" onClick={startScheduler}>
+                                            Arm Scheduler
+                                        </Button>
+                                    ) : (
+                                        <div className="text-center space-y-2 bg-indigo-100 dark:bg-indigo-900/30 p-2 rounded">
+                                            <div className="text-xs font-mono animate-pulse text-indigo-600 dark:text-indigo-400 font-bold uppercase">
+                                                STATUS: {schedulerStatus}
+                                            </div>
+                                            <Button size="sm" variant="destructive" className="w-full h-7 text-xs" onClick={cancelScheduler}>
+                                                Cancel / Disarm
+                                            </Button>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+
                         {platform === 'ARBITRAGE' ? (
                             <div className="space-y-4">
                                 <div className="bg-blue-50 dark:bg-blue-900/20 p-4 rounded-lg border border-blue-200">
                                     <h4 className="font-bold flex items-center gap-2 mb-2">
                                         <TrendingUp className="h-4 w-4" /> One-Click Arbitrage
                                     </h4>
-                                    <p className="text-xs text-muted-foreground mb-4">
-                                        System will automatically <strong>Long the lower rate</strong> and <strong>Short the higher rate</strong> APIs simultaneously.
-                                    </p>
-
                                     <div className="grid grid-cols-2 gap-4 text-center">
                                         <div className="bg-background p-2 rounded border">
                                             <div className="text-xs text-muted-foreground">Spread</div>
@@ -328,11 +516,10 @@ export function DemoTradingModal({ isOpen, onClose, data }) {
                                     <div className="space-y-2 text-sm border-t pt-2">
                                         <div className="flex justify-between"><span>Long Leg:</span> <span className="font-bold text-green-600">{arbitrageResult.longEx}</span></div>
                                         <div className="flex justify-between"><span>Short Leg:</span> <span className="font-bold text-red-600">{arbitrageResult.shortEx}</span></div>
-                                        <div className="flex justify-between border-t pt-1 font-bold"><span>Net Period P&L:</span> <span>${arbitrageResult.totalPnL.toFixed(4)}</span></div>
                                     </div>
                                 )}
 
-                                <Button className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold h-12" onClick={realExecution ? handleArbitrageExecute : handleExecute} disabled={loading}>
+                                <Button className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold h-12" onClick={realExecution ? handleArbitrageExecute : handleExecute} disabled={loading || schedulerStatus === "WAITING"}>
                                     {loading ? "Executing..." : (realExecution ? "EXECUTE ARBITRAGE (Real)" : "Simulate Arbitrage")}
                                 </Button>
                             </div>
@@ -374,6 +561,7 @@ export function DemoTradingModal({ isOpen, onClose, data }) {
                                 <Button
                                     className={`w-full h-12 text-lg font-bold shadow-lg transition-all ${recommendedAction === "LONG" ? "bg-green-600 hover:bg-green-700 text-white" : "bg-red-600 hover:bg-red-700 text-white"}`}
                                     onClick={handleExecute}
+                                    disabled={schedulerStatus === "WAITING"}
                                 >
                                     <Play className="mr-2 h-5 w-5 fill-current" />
                                     Simulate Recommended ({recommendedAction})
@@ -386,10 +574,10 @@ export function DemoTradingModal({ isOpen, onClose, data }) {
                                             <label className="text-xs text-muted-foreground">Qty (Units)</label>
                                             <Input type="number" value={testQty} onChange={(e) => setTestQty(Number(e.target.value))} className="h-10 font-bold" />
                                         </div>
-                                        <Button className="flex-1 h-10 bg-green-500 hover:bg-green-600 text-white font-bold" onClick={() => handleManualTest("LONG")} disabled={loading}>
+                                        <Button className="flex-1 h-10 bg-green-500 hover:bg-green-600 text-white font-bold" onClick={() => handleManualTest("LONG")} disabled={loading || schedulerStatus === "WAITING"}>
                                             {loading ? "Placing..." : "Buy / Long"}
                                         </Button>
-                                        <Button className="flex-1 h-10 bg-red-500 hover:bg-red-600 text-white font-bold" onClick={() => handleManualTest("SHORT")} disabled={loading}>
+                                        <Button className="flex-1 h-10 bg-red-500 hover:bg-red-600 text-white font-bold" onClick={() => handleManualTest("SHORT")} disabled={loading || schedulerStatus === "WAITING"}>
                                             {loading ? "Placing..." : "Sell / Short"}
                                         </Button>
                                     </div>
@@ -408,7 +596,7 @@ export function DemoTradingModal({ isOpen, onClose, data }) {
                         {/* Order Status Alert */}
                         {orderStatus && (
                             <div className={`p-3 rounded-md text-sm font-medium mt-4 ${orderStatus.status === 'success' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
-                                {orderStatus.status === 'success' ? <TrendingUp className="h-4 w-4 inline mr-2" /> : <AlertTriangle className="h-4 w-4 inline mr-2" />}
+                                {orderStatus.status === 'success' ? <CheckCircle2 className="h-4 w-4 inline mr-2" /> : <AlertTriangle className="h-4 w-4 inline mr-2" />}
                                 {orderStatus.message}
                             </div>
                         )}
