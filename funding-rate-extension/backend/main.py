@@ -660,7 +660,7 @@ async def get_scheduled_tasks():
 
 if __name__ == "__main__":
     import uvicorn
-    # Listen on all interfaces
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Listen on all interfaces with Hot Reload enabled
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
 
 

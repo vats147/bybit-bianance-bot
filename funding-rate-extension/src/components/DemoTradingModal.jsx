@@ -31,6 +31,43 @@ export function DemoTradingModal({ isOpen, onClose, data }) {
         paramsRef.current = { capital, leverage, testQty, platform, realExecution };
     }, [capital, leverage, testQty, platform, realExecution]);
 
+    // --- HOST HELPERS ---
+    const getBackendUrl = () => {
+        const primary = localStorage.getItem("primary_backend_url") || "http://127.0.0.1:8000";
+        const backup = localStorage.getItem("backup_backend_url");
+        return { primary, backup };
+    };
+
+    // --- BACKEND SCHEDULER POLLING ---
+    const [backendTasks, setBackendTasks] = useState({});
+
+    useEffect(() => {
+        const pollTasks = async () => {
+            try {
+                const { primary } = getBackendUrl();
+                const res = await fetch(`${primary}/api/scheduled-tasks`);
+                if (res.ok) {
+                    const data = await res.json();
+                    setBackendTasks(data.tasks);
+
+                    // Sync UI Status
+                    const tasks = Object.values(data.tasks);
+                    if (tasks.length > 0) {
+                        const latest = tasks.sort((a, b) => b.created_at - a.created_at)[0];
+                        if (latest.status.includes("WAITING")) setSchedulerStatus("WAITING");
+                        else if (latest.status.includes("EXECUTING")) setSchedulerStatus("EXECUTING");
+                        else if (latest.status === "COMPLETED") setSchedulerStatus("COMPLETED");
+                        else if (latest.status.startsWith("FAILED")) setSchedulerStatus("FAILED");
+                    }
+                }
+            } catch (e) {
+                // Silent fail on poll
+            }
+        };
+        const interval = setInterval(pollTasks, 2000); // 2s polling
+        return () => clearInterval(interval);
+    }, []);
+
 
     useEffect(() => {
         if (!data || !data.nextFundingTime) return;
@@ -209,12 +246,6 @@ export function DemoTradingModal({ isOpen, onClose, data }) {
 
 
     const executeTrade = async (targetPlatform, direction, qty) => {
-        const getBackendUrl = () => {
-            const primary = localStorage.getItem("primary_backend_url") || "http://127.0.0.1:8000";
-            const backup = localStorage.getItem("backup_backend_url");
-            return { primary, backup };
-        };
-
         const getAuthHeaders = () => {
             const headers = { 'Content-Type': 'application/json' };
             if (targetPlatform === "BYBIT") {
@@ -294,10 +325,10 @@ export function DemoTradingModal({ isOpen, onClose, data }) {
         // Construct Payload
         const payload = {
             symbol: symbol,
-            direction: direction, // Assuming 'direction' is available, or use logic below
-            targetTime: targetTime / 1000, // Unix timestamp in seconds
+            // direction will be set below
+            targetTime: targetTime / 1000,
             leverage: leverage,
-            qty: testQty, // Use testQty 
+            qty: testQty,
             platform: platform === "ARBITRAGE" ? "Both" : platform
         };
 
