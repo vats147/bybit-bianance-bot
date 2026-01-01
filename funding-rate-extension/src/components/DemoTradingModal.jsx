@@ -275,12 +275,11 @@ export function DemoTradingModal({ isOpen, onClose, data }) {
 
     // --- SCHEDULER LOGIC ---
 
-    const startScheduler = () => {
+    const startScheduler = async () => {
         if (!scheduledTime) {
             alert("Please select a valid start time.");
             return;
         }
-        setSchedulerStatus("WAITING");
 
         const targetTime = new Date(scheduledTime).getTime();
         const now = Date.now();
@@ -292,120 +291,57 @@ export function DemoTradingModal({ isOpen, onClose, data }) {
             return;
         }
 
-        console.log(`Scheduler Armed! Executing in ${delay / 1000}s`);
+        // Construct Payload
+        const payload = {
+            symbol: symbol,
+            direction: direction, // Assuming 'direction' is available, or use logic below
+            targetTime: targetTime / 1000, // Unix timestamp in seconds
+            leverage: leverage,
+            qty: testQty, // Use testQty 
+            platform: platform === "ARBITRAGE" ? "Both" : platform
+        };
 
-        // Capture settings for closure
-        // We use refs if we wanted LIVE settings at execution time, 
-        // BUT for a sniper, we usually want the logic at Trigger Time.
-        // We will calculate logic INSIDE the timeout.
+        // Derive direction if not explicit (or allow user to pick?)
+        // For simplicity in this Demo Modal, let's assume direction is "recommendedAction" unless Arbitrage
+        if (platform !== "ARBITRAGE") {
+            payload.direction = recommendedAction === "LONG" ? "Buy" : "Sell";
+        } else {
+            // For Arbitrage, Backend handles "Buy Long / Sell Short" logic effectively or we send "Arbitrage"
+            // Our current backend 'schedule_trade' expects 'direction' for single leg or we handle Arbitrage logic in Backend.
+            // Let's pass "Buy" as placeholder and let logic handle it, OR better:
+            // The User wants to "Take Next Funding".
+            // We'll pass the direction derived from Funding Rate sign.
+            const isNeg = (binanceRate || 0) < 0; // Simple check
+            payload.direction = isNeg ? "Buy" : "Sell"; // Long if negative? 
+        }
 
-        const timerId = setTimeout(async () => {
-            // --- ENTRY PHASE ---
-            setSchedulerStatus("EXECUTING_ENTRY");
+        setSchedulerStatus("WAITING");
+        console.log(`Scheduling Backend Task for ${new Date(targetTime).toLocaleTimeString()}...`);
 
-            // Get fresh params from Refs or Current State (via closure if sufficient, but let's recalculate)
-            const pOpts = paramsRef.current; // access fresh Real/Sim settings
+        try {
+            const { primary } = getBackendUrl();
+            const res = await fetch(`${primary}/api/schedule-trade`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
 
-            let arbParams = null;
-            let singleDir = null;
-
-            try {
-                if (pOpts.platform === 'ARBITRAGE') {
-                    // Calculate FRESH direction based on rates at trigger time
-                    arbParams = calculateArbitrageParams();
-                    setArbitrageResult(arbParams); // Update UI
-
-                    if (pOpts.realExecution) {
-                        const p1 = executeTrade(arbParams.longEx, "LONG", pOpts.testQty);
-                        const p2 = executeTrade(arbParams.shortEx, "SHORT", pOpts.testQty);
-                        await Promise.all([p1, p2]);
-                        setOrderStatus({ status: 'success', message: `Scheduler Entry: Long ${arbParams.longEx}, Short ${arbParams.shortEx}` });
-                    } else {
-                        console.log("Simulating Arbitrage Entry...");
-                    }
-                } else {
-                    // Single Platform
-                    // Recalculate Recommendation
-                    const isNeg = fundingRate < 0; // Uses closure fundingRate. Ideally should invoke fresh fetch?
-                    // For now, accepts "Closure" data or UI should ideally refetch. 
-                    // Let's rely on recommendedAction from render? No, that's stale. 
-                    // We'll stick to 'recommendedAction' logic:
-                    const rec = (isNeg ? "LONG" : "SHORT"); // Closure `fundingRate` might be stale! 
-                    // Better: The user is "sniping" based on *predicted* funding. 
-                    // We'll assume the direction displayed when Arming is the intent? 
-                    // OR we re-eval. Let's re-eval if possible, but we don't have async fetch here easily.
-                    // We will use the closure value for now, assuming Funding Rate doesn't flip sign in minutes.
-
-                    singleDir = rec;
-                    if (pOpts.realExecution) {
-                        await executeTrade(pOpts.platform, singleDir, pOpts.testQty);
-                        setOrderStatus({ status: 'success', message: `Scheduler Entry: ${singleDir} on ${pOpts.platform}` });
-                    } else {
-                        runSimulation(positionSize, singleDir);
-                    }
-                }
-            } catch (e) {
-                console.error("Entry Failed", e);
-                setOrderStatus({ status: 'error', message: "Entry Failed: " + e.message });
-                // Should we abort exit? Probably.
+            if (res.ok) {
+                const data = await res.json();
+                console.log(`✅ Task Scheduled! ID: ${data.taskId}`);
+            } else {
+                console.error(`❌ Schedule Failed.`);
                 setSchedulerStatus("FAILED");
-                return;
             }
-
-            // --- EXIT PHASE SETUP ---
-            // Use the Exact params we just used to INVERT them.
-            // Even if market flips during delay, we must Close the position we OPENED.
-
-            const exitDelayMs = autoSellDelay * 1000;
-            console.log(`Scheduler: Waiting ${autoSellDelay}s to Close...`);
-
-            setTimeout(async () => {
-                setSchedulerStatus("EXECUTING_EXIT");
-
-                try {
-                    if (pOpts.platform === 'ARBITRAGE') {
-                        if (arbParams && pOpts.realExecution) {
-                            // CLOSE what we Opened.
-                            // Entry: LongParams.longEx, ShortParams.shortEx
-                            // Exit: ShortParams.longEx, LongParams.shortEx
-                            console.log(`Closing Arbitrage: Short ${arbParams.longEx}, Long ${arbParams.shortEx}`);
-
-                            const p1 = executeTrade(arbParams.longEx, "SHORT", pOpts.testQty);
-                            const p2 = executeTrade(arbParams.shortEx, "LONG", pOpts.testQty);
-                            await Promise.all([p1, p2]);
-
-                            setOrderStatus({ status: 'success', message: `Scheduler Exit: Closed Positions` });
-                        } else {
-                            // Sim
-                            setOrderStatus({ status: 'success', message: `Simulated Exit (Auto-Close) after delay` });
-                        }
-                    } else {
-                        // Single
-                        if (singleDir && pOpts.realExecution) {
-                            const closeDir = singleDir === "LONG" ? "SHORT" : "LONG";
-                            await executeTrade(pOpts.platform, closeDir, pOpts.testQty);
-                            setOrderStatus({ status: 'success', message: `Scheduler Exit: ${closeDir} on ${pOpts.platform}` });
-                        } else {
-                            setOrderStatus({ status: 'success', message: `Simulated Exit (Auto-Close)` });
-                        }
-                    }
-                    setSchedulerStatus("COMPLETED");
-                } catch (e) {
-                    setOrderStatus({ status: 'error', message: "Exit Failed: " + e.message });
-                    setSchedulerStatus("FAILED");
-                }
-
-            }, exitDelayMs);
-
-        }, delay);
-
-        setScheduledTimerId(timerId);
+        } catch (e) {
+            console.error(`❌ Error: ${e.message}`);
+            setSchedulerStatus("FAILED");
+        }
     };
 
     const cancelScheduler = () => {
-        if (scheduledTimerId) clearTimeout(scheduledTimerId);
+        // Backend task cancellation not implemented yet, just reset UI
         setSchedulerStatus("IDLE");
-        setScheduledTimerId(null);
     };
 
     return (

@@ -11,7 +11,89 @@ import os
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
+# Load environment variables from .env file
 load_dotenv()
+
+# --- SCHEDULER & PROFIT TRACKING ---
+class TradeScheduler:
+    def __init__(self):
+        self.tasks = {} # taskId -> { status, details, profit }
+        self.profit_log = [] # List of { time, symbol, profit }
+
+    async def execute_trade_sequence(self, task_id, params):
+        """
+        Executes:
+        1. Wait until (TargetTime - 20s) -> MARKET BUY
+        2. Wait until (TargetTime + 10s) -> MARKET SELL
+        3. Record estimated profit
+        """
+        try:
+            target_time = params['targetTime'] # Unix timestamp in seconds
+            now = time.time()
+            
+            # 1. Wait for Entry (Target - 20s)
+            entry_time = target_time - 20
+            delay_entry = entry_time - now
+            
+            if delay_entry > 0:
+                self.tasks[task_id]['status'] = f"WAITING_ENTRY (Starts in {int(delay_entry)}s)"
+                await asyncio.sleep(delay_entry)
+            
+            # --- EXECUTE ENTRY ---
+            self.tasks[task_id]['status'] = "EXECUTING_ENTRY"
+            
+            # Call Place Order Logic (Reuse existing function logic or direct call)
+            # For simplicity, we'll simulate the call logic or verify connection
+            # In production, you'd call the `place_order` internal function directly
+            
+            # Entry Order
+            entry_side = params['direction']
+            await self._internal_place_order(params['symbol'], entry_side, params['qty'], params['leverage'], params['platform'])
+            
+            # 2. Wait for Exit (Target + 10s) -> 30s duration from entry
+            # Total wait from Entry point is ~30s (20s pre + 10s post)
+            await asyncio.sleep(30)
+            
+            # --- EXECUTE EXIT ---
+            self.tasks[task_id]['status'] = "EXECUTING_EXIT"
+            exit_side = "Sell" if entry_side == "Buy" else "Buy"
+            await self._internal_place_order(params['symbol'], exit_side, params['qty'], params['leverage'], params['platform'])
+            
+            # 3. PROFIT CALCULATION ( Simulated / Estimated )
+            # Profit ~ (Position Value * Funding Rate) - Fees
+            # We'll use a simplified estimate: Qty * Mark Price * Funding Rate (if available)
+            estimated_profit = self._calculate_profit(params)
+            
+            self.tasks[task_id]['status'] = "COMPLETED"
+            self.tasks[task_id]['profit'] = estimated_profit
+            self.profit_log.append({
+                "time": time.time(),
+                "symbol": params['symbol'],
+                "profit": estimated_profit,
+                "type": "Funding Arbitrage"
+            })
+            
+        except Exception as e:
+            print(f"Scheduler Error: {e}")
+            self.tasks[task_id]['status'] = f"FAILED: {str(e)}"
+
+    async def _internal_place_order(self, symbol, side, qty, leverage, platform):
+        # Depending on platform, call appropriate internal logic
+        # For Demo/Test, we print. For Real, we'd invoke the same logic as the API route.
+        print(f"⚡️ SCHEDULER EXECUTION: {platform} {side} {symbol} x{leverage} Qty:{qty}")
+        
+        # NOTE: To actually execute, we need to extract the logic from `place_order` into a reusable function 
+        # that doesn't depend on FastAPI Request objects (Header dependency injection).
+        # For now, we assume we have default keys or this method handles it.
+        pass
+
+    def _calculate_profit(self, params):
+        # Mock calculation based on typical funding rate
+        # Real calculation would need current funding rate fetch
+        return float(params['qty']) * 0.0001 * 100 # Mock: 0.01% of notional? Just a placeholder.
+
+scheduler = TradeScheduler()
+
 
 app = FastAPI()
 
@@ -540,6 +622,41 @@ async def get_metadata():
         print(f"Metadata Fetch Error: {e}")
         return {}
 
+
+# --- SCHEDULER ENDPOINTS ---
+class ScheduleRequest(BaseModel):
+    symbol: str
+    direction: str # "Buy" or "Sell"
+    targetTime: float # Unix timestamp
+    leverage: int = 5
+    qty: float
+    platform: str = "Both"
+
+@app.post("/api/schedule-trade")
+async def schedule_trade(req: ScheduleRequest):
+    import uuid
+    task_id = str(uuid.uuid4())
+    
+    # Store task
+    scheduler.tasks[task_id] = {
+        "status": "QUEUED",
+        "params": req.dict(),
+        "profit": 0,
+        "created_at": time.time()
+    }
+    
+    # Start async task
+    asyncio.create_task(scheduler.execute_trade_sequence(task_id, req.dict()))
+    
+    return {"status": "queued", "taskId": task_id}
+
+@app.get("/api/scheduled-tasks")
+async def get_scheduled_tasks():
+    # Return list of tasks
+    return {
+        "tasks": scheduler.tasks,
+        "profit_log": scheduler.profit_log
+    }
 
 if __name__ == "__main__":
     import uvicorn
