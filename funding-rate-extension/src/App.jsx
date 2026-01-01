@@ -171,6 +171,29 @@ function App() {
   // symbol -> { binanceRate, bybitRate, ... }
   const dataRef = useRef({});
 
+  const getBackendUrl = () => {
+    const primary = localStorage.getItem("primary_backend_url") || "http://127.0.0.1:8000";
+    const backup = localStorage.getItem("backup_backend_url");
+    return { primary, backup };
+  };
+
+  const [intervalMap, setIntervalMap] = useState({});
+
+  useEffect(() => {
+    // Fetch Interval Metadata
+    const fetchMetadata = async () => {
+      try {
+        const { primary } = getBackendUrl();
+        const res = await fetch(`${primary}/api/metadata`);
+        if (res.ok) {
+          const map = await res.json();
+          setIntervalMap(map);
+        }
+      } catch (e) { console.error("Metadata fetch failed", e); }
+    };
+    fetchMetadata();
+  }, []);
+
   const updateTableData = () => {
     // Allow rows if we have a symbol key (populated by initial fetch or WS)
     const merged = Object.values(dataRef.current)
@@ -196,6 +219,11 @@ function App() {
           apr = spread * 3 * 365;
         }
 
+        // Interval Lookup
+        const intervals = intervalMap[item.symbol] || {};
+        const bybitInt = intervals.bybit || 8;
+        const binanceInt = intervals.binance || 8;
+
         return {
           ...item,
           nextFundingTime,
@@ -206,7 +234,8 @@ function App() {
           binanceRate: binanceRateVal * 100,
           bybitRate: bybitRateVal * 100,
           binanceRateRaw: binanceRateVal,
-          bybitRateRaw: bybitRateVal
+          bybitRateRaw: bybitRateVal,
+          intervals: { bybit: bybitInt, binance: binanceInt }
         };
       })
       // Filter out incomplete rows ONLY if user wants strict mode (optional), 
@@ -340,6 +369,50 @@ function App() {
 
   const [searchQuery, setSearchQuery] = useState("");
 
+  // Testnet Filtering Logic
+  const [testnetSymbols, setTestnetSymbols] = useState(new Set());
+  const [isTestnet, setIsTestnet] = useState(false);
+
+  useEffect(() => {
+    // Check setting
+    const checkSetting = () => {
+      const val = localStorage.getItem("user_binance_testnet") !== "false"; // Default true if not set, or check logic
+      // Actually SettingsPage default is true if null? 
+      // In SettingsPage: useState(localStorage.getItem("user_binance_testnet") !== "false")
+      // So let's match that.
+      setIsTestnet(val);
+    };
+    checkSetting();
+    // Listen for storage changes (if user changes settings in another tab)
+    window.addEventListener('storage', checkSetting);
+
+    // Also fetch the list
+    const fetchTestnetList = async () => {
+      try {
+        const { primary } = getBackendUrl();
+        const res = await fetch(`${primary}/api/binance/testnet-symbols`);
+        if (res.ok) {
+          const d = await res.json();
+          setTestnetSymbols(new Set(d.symbols));
+        }
+      } catch (e) {
+        console.error("Failed to fetch testnet symbols", e);
+      }
+    };
+    fetchTestnetList();
+
+    return () => window.removeEventListener('storage', checkSetting);
+  }, []);
+
+  // Update isTestnet when tab changes to 'scanner' in case user just came from Settings
+  useEffect(() => {
+    if (currentTab === 'scanner') {
+      const val = localStorage.getItem("user_binance_testnet") !== "false";
+      setIsTestnet(val);
+    }
+  }, [currentTab]);
+
+
   // Sorting Logic
   const sortedData = useMemo(() => {
     let sortableItems = [...data];
@@ -357,9 +430,18 @@ function App() {
     return sortableItems.filter(item => {
       const matchesSpread = item.spread >= parseFloat(minSpread);
       const matchesSearch = item.symbol.toLowerCase().includes(searchQuery.toLowerCase());
-      return matchesSpread && matchesSearch;
+
+      // Filter by Testnet Availability if Testnet is ON
+      // If we are in testnet mode, and the symbol is NOT in the allowed list, hide it.
+      // But only if we have fetched the list (size > 0).
+      let matchesTestnet = true;
+      if (isTestnet && testnetSymbols.size > 0) {
+        matchesTestnet = testnetSymbols.has(item.symbol);
+      }
+
+      return matchesSpread && matchesSearch && matchesTestnet;
     });
-  }, [data, sortConfig, minSpread, searchQuery]);
+  }, [data, sortConfig, minSpread, searchQuery, isTestnet, testnetSymbols]);
 
   const requestSort = (key) => {
     let direction = 'ascending';
@@ -570,22 +652,19 @@ function App() {
                       <TableHead className="w-[100px] font-bold text-primary sticky left-0 z-20 bg-background shadow-[1px_0_5px_rgba(0,0,0,0.1)]">Symbol</TableHead>
                       <TableHead className="min-w-[100px]">Mark Price</TableHead>
                       <TableHead className="min-w-[120px]">Funding (Interval)</TableHead>
-                      <TableHead onClick={() => requestSort('binanceRate')} className="cursor-pointer hover:text-primary transition-colors whitespace-nowrap min-w-[120px]">
-                        Binance Rate % <ArrowUpDown className="inline h-3 w-3 ml-1" />
+                      <TableHead className="text-right cursor-pointer hover:text-primary transition-colors hover:bg-muted/50" onClick={() => requestSort('bybitRateRaw')}>
+                        Bybit (Int.) {sortConfig.key === 'bybitRateRaw' && (sortConfig.direction === 'ascending' ? '↑' : '↓')}
                       </TableHead>
-                      <TableHead onClick={() => requestSort('bybitRate')} className="cursor-pointer hover:text-primary transition-colors whitespace-nowrap min-w-[120px]">
-                        Bybit Rate % <ArrowUpDown className="inline h-3 w-3 ml-1" />
+                      <TableHead className="text-right cursor-pointer hover:text-primary transition-colors hover:bg-muted/50" onClick={() => requestSort('binanceRateRaw')}>
+                        Binance (Int.) {sortConfig.key === 'binanceRateRaw' && (sortConfig.direction === 'ascending' ? '↑' : '↓')}
                       </TableHead>
-                      <TableHead onClick={() => requestSort('spread')} className="cursor-pointer hover:text-primary transition-colors whitespace-nowrap min-w-[120px]">
-                        Spread % <ArrowUpDown className="inline h-3 w-3 ml-1" />
+                      <TableHead className="text-right cursor-pointer hover:text-primary transition-colors hover:bg-muted/50" onClick={() => requestSort('spread')}>
+                        Spread {sortConfig.key === 'spread' && (sortConfig.direction === 'ascending' ? '↑' : '↓')}
                       </TableHead>
-                      <TableHead onClick={() => requestSort('diff')} className="cursor-pointer hover:text-primary transition-colors whitespace-nowrap min-w-[120px]">
-                        Diff % <ArrowUpDown className="inline h-3 w-3 ml-1" />
+                      <TableHead className="text-right cursor-pointer hover:text-primary transition-colors hover:bg-muted/50" onClick={() => requestSort('apr')}>
+                        APR {sortConfig.key === 'apr' && (sortConfig.direction === 'ascending' ? '↑' : '↓')}
                       </TableHead>
-                      <TableHead onClick={() => requestSort('apr')} className="cursor-pointer hover:text-primary transition-colors whitespace-nowrap min-w-[120px]">
-                        Est. 3-Day APR %
-                      </TableHead>
-                      <TableHead className="text-right sticky right-0 z-20 bg-background shadow-[-1px_0_5px_rgba(0,0,0,0.1)]">Actions</TableHead>
+                      <TableHead className="text-right">Action</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>

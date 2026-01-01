@@ -212,9 +212,14 @@ async def place_order(
             print(f"Bybit API Error: {data}")
             raise HTTPException(status_code=400, detail=f"Bybit Error: {data.get('retMsg')} (Code: {data.get('retCode')})")
 
+    except HTTPException as he:
+        raise he
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         print(f"Order Placement Failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        detail_msg = f"Internal Server Error: {str(e)}" if str(e) else "Internal Server Error (Check Logs)"
+        raise HTTPException(status_code=500, detail=detail_msg)
 
 @app.get("/api/wallet-balance")
 async def get_wallet_balance(
@@ -245,6 +250,8 @@ async def get_wallet_balance(
         
         return response.json()
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         print(f"Wallet Balance Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -288,6 +295,252 @@ async def get_transaction_log(
         print(f"Transaction Log Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
+
+# --- BINANCE INTEGRATION ---
+
+class BinanceOrderRequest(BaseModel):
+    symbol: str
+    side: str
+    qty: float
+    leverage: int = 5
+    is_testnet: bool = True
+
+def get_binance_credentials(x_user_key: Optional[str], x_user_secret: Optional[str]):
+    # Only support Header keys for now as we didn't add env vars for Binance
+    if not x_user_key or not x_user_secret:
+         raise HTTPException(status_code=400, detail="Binance API Keys missing. Configure in Settings.")
+    return x_user_key, x_user_secret
+
+@app.post("/api/binance/place-order")
+async def place_binance_order(
+    order: BinanceOrderRequest,
+    x_user_binance_key: Optional[str] = Header(None),
+    x_user_binance_secret: Optional[str] = Header(None)
+):
+    api_key, api_secret = get_binance_credentials(x_user_binance_key, x_user_binance_secret)
+    
+    base_url = "https://testnet.binancefuture.com" if order.is_testnet else "https://fapi.binance.com"
+    endpoint = "/fapi/v1/order"
+    
+    try:
+        # Valid Params for Binance Futures
+        # symbol, side (BUY/SELL), type (MARKET), quantity, timestamp, signature
+        
+        # 1. Set Leverage (Optional, but good practice)
+        # Endpoint: POST /fapi/v1/leverage
+        try:
+            lev_endpoint = "/fapi/v1/leverage"
+            lev_params = {
+                "symbol": order.symbol + "USDT" if not order.symbol.endswith("USDT") else order.symbol,
+                "leverage": order.leverage,
+                "timestamp": int(time.time() * 1000)
+            }
+            lev_query_string = urlencode(lev_params)
+            lev_signature = hmac.new(api_secret.encode('utf-8'), lev_query_string.encode('utf-8'), hashlib.sha256).hexdigest()
+            
+            lev_headers = { "X-MBX-APIKEY": api_key }
+            requests.post(f"{base_url}{lev_endpoint}?{lev_query_string}&signature={lev_signature}", headers=lev_headers)
+        except Exception as e:
+            print(f"Binance Leverage Error (Non-fatal): {e}")
+
+        # 2. Place Order
+        params = {
+            "symbol": order.symbol + "USDT" if not order.symbol.endswith("USDT") else order.symbol,
+            "side": order.side.upper(), # BUY or SELL
+            "type": "MARKET",
+            "quantity": order.qty,
+            "timestamp": int(time.time() * 1000)
+        }
+        
+        query_string = urlencode(params)
+        signature = hmac.new(api_secret.encode('utf-8'), query_string.encode('utf-8'), hashlib.sha256).hexdigest()
+        
+        final_url = f"{base_url}{endpoint}?{query_string}&signature={signature}"
+        headers = { "X-MBX-APIKEY": api_key }
+        
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(None, lambda: requests.post(final_url, headers=headers))
+        
+        data = response.json()
+        
+        # Check for error code (Binance returns 'code' and 'msg' on error)
+        if "code" in data and data["code"] != 0:
+             print(f"Binance API Error: {data}")
+             msg = data.get('msg')
+             code = data.get('code')
+             
+             if code == -4140:
+                 raise HTTPException(status_code=400, detail=f"Symbol '{order.symbol}' is likely not available on Binance Testnet. Try BTC or ETH. (Binance Code: -4140)")
+             
+             raise HTTPException(status_code=400, detail=f"Binance Error: {msg} (Code: {code})")
+             
+        return {"status": "success", "data": data}
+
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f"Binance Order Failed: {e}")
+        detail_msg = f"Internal Server Error: {str(e)}" if str(e) else "Internal Server Error (Check Logs)"
+        raise HTTPException(status_code=500, detail=detail_msg)
+
+
+@app.get("/api/binance/testnet-symbols")
+async def get_testnet_symbols():
+    try:
+        url = "https://testnet.binancefuture.com/fapi/v1/exchangeInfo"
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(None, requests.get, url)
+        
+        if response.status_code == 200:
+            data = response.json()
+            # Filter for symbols that are TRADING
+            # And strip USDT to match our internal format
+            valid_symbols = [
+                s['symbol'].replace("USDT", "") 
+                for s in data['symbols'] 
+                if s['status'] == "TRADING" and s['symbol'].endswith("USDT")
+            ]
+            return {"symbols": valid_symbols}
+        return {"symbols": []}
+    except Exception as e:
+        print(f"Error fetching testnet symbols: {e}")
+        return {"symbols": []}
+
+
+@app.get("/api/binance/wallet-balance")
+async def get_binance_balance(
+    x_user_binance_key: Optional[str] = Header(None),
+    x_user_binance_secret: Optional[str] = Header(None),
+    is_testnet: bool = True 
+):
+    # Note: is_testnet param via query, usually sent by frontend
+    api_key, api_secret = get_binance_credentials(x_user_binance_key, x_user_binance_secret)
+    base_url = "https://testnet.binancefuture.com" if is_testnet else "https://fapi.binance.com"
+    endpoint = "/fapi/v2/balance"
+
+    try:
+        timestamp = int(time.time() * 1000)
+        params = {"timestamp": timestamp}
+        query_string = urlencode(params)
+        signature = hmac.new(api_secret.encode('utf-8'), query_string.encode('utf-8'), hashlib.sha256).hexdigest()
+        
+        final_url = f"{base_url}{endpoint}?{query_string}&signature={signature}"
+        headers = { "X-MBX-APIKEY": api_key }
+        
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(None, lambda: requests.get(final_url, headers=headers))
+        
+        if response.status_code != 200:
+             return {"error": response.json()}
+             
+        # Filter for non-zero balances or format it nicely
+        data = response.json()
+        return data
+    except Exception as e:
+        print(f"Binance Balance Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/binance/orders")
+async def get_binance_orders(
+    x_user_binance_key: Optional[str] = Header(None),
+    x_user_binance_secret: Optional[str] = Header(None),
+    is_testnet: bool = True,
+    symbol: Optional[str] = None
+):
+    api_key, api_secret = get_binance_credentials(x_user_binance_key, x_user_binance_secret)
+    base_url = "https://testnet.binancefuture.com" if is_testnet else "https://fapi.binance.com"
+    endpoint = "/fapi/v1/userTrades" # User Trades (Fills) is better than All Orders for history
+
+    try:
+        timestamp = int(time.time() * 1000)
+        params = {"timestamp": timestamp}
+        if symbol:
+            params['symbol'] = symbol
+            
+        # If no symbol provided, Binance usually requires it or has a different endpoint /fapi/v1/userTrades requires symbol? 
+        # Actually /fapi/v1/userTrades REQUIRES symbol. 
+        # /fapi/v1/allOrders REQUIRES symbol.
+        # Handling: If no symbol, maybe return empty or error? Or iterate typical pairs? 
+        # For a dashboard, maybe we want recent account activity? 
+        # Endpoint /fapi/v1/income might be better for general history without symbol.
+        # Let's try /fapi/v1/userTrades but warn if no symbol.
+        # OR implementation shift: use /fapi/v1/account which has position info.
+        
+        # Let's default to a "Last Trades" approach. If symbol is missing, we can't fetch trades easily on Binance Futures API without iterating.
+        # BUT, /fapi/v1/income (Transaction History) works without symbol (defaults to last 7 days).
+        
+        endpoint = "/fapi/v1/income" # Switch to income/transaction history
+        
+        query_string = urlencode(params)
+        signature = hmac.new(api_secret.encode('utf-8'), query_string.encode('utf-8'), hashlib.sha256).hexdigest()
+        
+        final_url = f"{base_url}{endpoint}?{query_string}&signature={signature}"
+        headers = { "X-MBX-APIKEY": api_key }
+        
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(None, lambda: requests.get(final_url, headers=headers))
+        
+        return response.json()
+    except Exception as e:
+        print(f"Binance Orders Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/metadata")
+async def get_metadata():
+    """
+    Fetches instrument info (Funding Intervals) from Bybit and Binance.
+    Returns a map: Symbol -> { bybitInterval: int (hours), binanceInterval: int (hours) }
+    """
+    try:
+        loop = asyncio.get_event_loop()
+        
+        # 1. Fetch Bybit Intervals
+        bybit_url = "https://api.bybit.com/v5/market/instruments-info?category=linear"
+        bybit_task = loop.run_in_executor(None, requests.get, bybit_url)
+        
+        # 2. Fetch Binance Intervals (Mainnet usually correct for metadata)
+        binance_url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
+        binance_task = loop.run_in_executor(None, requests.get, binance_url)
+        
+        r_bybit, r_binance = await asyncio.gather(bybit_task, binance_task)
+        
+        metadata = {}
+        
+        # Process Bybit
+        if r_bybit.status_code == 200:
+            d = r_bybit.json()
+            if d['retCode'] == 0:
+                for item in d['result']['list']:
+                    if not item['symbol'].endswith("USDT"): continue
+                    sym = item['symbol'].replace("USDT", "") 
+                    
+                    interval_min = int(item.get('fundingInterval', 480))
+                    metadata[sym] = { "bybit": interval_min // 60 } # Convert to hours
+        
+        # Process Binance
+        if r_binance.status_code == 200:
+            d = r_binance.json()
+            # exchangeInfo structure: { symbols: [ ... ] }
+            if 'symbols' in d:
+                for item in d['symbols']:
+                    if item['contractType'] != 'PERPETUAL': continue
+                    if not item['symbol'].endswith("USDT"): continue
+                    sym = item['symbol'].replace("USDT", "")
+                    
+                    # Default to 8h if not found, but recent API has 'fundingIntervalHours'
+                    interval = 8 
+                    
+                    if sym not in metadata: metadata[sym] = {}
+                    metadata[sym]["binance"] = interval
+
+        return metadata
+
+    except Exception as e:
+        print(f"Metadata Fetch Error: {e}")
+        return {}
 
 
 if __name__ == "__main__":
