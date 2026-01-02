@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { ArbitrageModal } from "@/components/ArbitrageModal";
+import { TradeSidePanel } from "./components/TradeSidePanel";
 import { DemoTradingModal } from "./components/DemoTradingModal";
 import { DashboardPage } from "./components/DashboardPage";
 import { SettingsPage } from "./components/SettingsPage";
@@ -774,12 +775,26 @@ function App() {
             </Card>
 
 
-            {/* Modal */}
-            <ArbitrageModal
+// ... existing imports
+            import {TradeSidePanel} from "./components/TradeSidePanel";
+
+            // ... existing code ...
+
+            {/* Modal - Replaced/Augmented with Side Panel */}
+            {/* Keeping ArbitrageModal logic if needed but user requested Trade to open Side Panel */}
+
+            <TradeSidePanel
               isOpen={!!selectedOpportunity}
               onClose={() => setSelectedOpportunity(null)}
               data={selectedOpportunity}
             />
+
+            {/* Temporarily commented out old modal for direct replacement as per request */}
+            {/* <ArbitrageModal
+              isOpen={!!selectedOpportunity}
+              onClose={() => setSelectedOpportunity(null)}
+              data={selectedOpportunity}
+            /> */}
           </>
         )}
 
@@ -795,3 +810,4 @@ function App() {
 }
 
 export default App;
+

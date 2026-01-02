@@ -349,11 +349,24 @@ export function DemoTradingModal({ isOpen, onClose, data }) {
         setSchedulerStatus("WAITING");
         console.log(`Scheduling Backend Task for ${new Date(targetTime).toLocaleTimeString()}...`);
 
+        // Prepare Headers with Keys
+        const headers = { 'Content-Type': 'application/json' };
+
+        const bybitKey = localStorage.getItem("user_bybit_key");
+        const bybitSecret = localStorage.getItem("user_bybit_secret");
+        if (bybitKey) headers["X-User-Bybit-Key"] = bybitKey;
+        if (bybitSecret) headers["X-User-Bybit-Secret"] = bybitSecret;
+
+        const binanceKey = localStorage.getItem("user_binance_key");
+        const binanceSecret = localStorage.getItem("user_binance_secret");
+        if (binanceKey) headers["X-User-Binance-Key"] = binanceKey;
+        if (binanceSecret) headers["X-User-Binance-Secret"] = binanceSecret;
+
         try {
             const { primary } = getBackendUrl();
             const res = await fetch(`${primary}/api/schedule-trade`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: headers,
                 body: JSON.stringify(payload)
             });
 
