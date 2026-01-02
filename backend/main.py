@@ -269,7 +269,8 @@ class BybitWebSocketManager:
         self.loop = None
     
     def get_ws_url(self):
-        return BYBIT_WS_LIVE if self.is_live else BYBIT_WS_TESTNET
+        # Always use Live WS for accurate funding scanner rates, even if account is Testnet
+        return BYBIT_WS_LIVE
     
     async def _connect(self):
         url = self.get_ws_url()
@@ -420,9 +421,9 @@ async def fetch_bybit_rates(is_live: bool = False):
     try:
         loop = asyncio.get_event_loop()
         params = {"category": "linear"}
-        # Switch URL based on mode
-        url = BYBIT_API_URL if is_live else BYBIT_API_TESTNET_URL
-        print(f"DEBUG: Fetching Bybit Rates from: {url}")
+        # Always use Live API for accurate funding scanner rates
+        url = BYBIT_API_URL
+        print(f"DEBUG: Fetching Bybit Rates from: {url} (Scanner always uses Live)")
         
         response = await loop.run_in_executor(None, functools.partial(requests.get, url, params=params))
         

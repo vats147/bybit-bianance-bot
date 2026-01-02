@@ -131,23 +131,30 @@ export function SettingsPage() {
                     <CardContent className="space-y-4">
                         <div className="space-y-2">
                             <label className="text-sm font-medium">API Key (Demo)</label>
-                            <Input
-                                name="apiKey"
-                                type="password"
-                                value={config.apiKey}
-                                onChange={handleChange}
-                                placeholder="Bybit Demo API Key"
-                            />
+                            <div className="relative">
+                                <Input
+                                    name="apiKey"
+                                    type="password"
+                                    value={config.apiKey}
+                                    onChange={handleChange}
+                                    placeholder={config.apiKey ? "Bybit Demo API Key" : "⚠️ Key Not Set - Required for Scanner"}
+                                    className={!config.apiKey ? "border-red-500 bg-red-50/10 focus-visible:ring-red-500" : ""}
+                                />
+                                {!config.apiKey && <p className="text-[10px] text-red-500 font-medium mt-1">Bybit API Key is missing. Funding data may be incomplete.</p>}
+                            </div>
                         </div>
                         <div className="space-y-2">
                             <label className="text-sm font-medium">API Secret (Demo)</label>
-                            <Input
-                                name="apiSecret"
-                                type="password"
-                                value={config.apiSecret}
-                                onChange={handleChange}
-                                placeholder="Bybit Demo Secret"
-                            />
+                            <div className="relative">
+                                <Input
+                                    name="apiSecret"
+                                    type="password"
+                                    value={config.apiSecret}
+                                    onChange={handleChange}
+                                    placeholder={config.apiSecret ? "Bybit Demo Secret" : "⚠️ Secret Not Set"}
+                                    className={!config.apiSecret ? "border-red-500 bg-red-50/10 focus-visible:ring-red-500" : ""}
+                                />
+                            </div>
                         </div>
                     </CardContent>
                 </Card>
@@ -171,23 +178,30 @@ export function SettingsPage() {
                         </div>
                         <div className="space-y-2">
                             <label className="text-sm font-medium">API Key</label>
-                            <Input
-                                name="binanceKey"
-                                type="password"
-                                value={config.binanceKey}
-                                onChange={handleChange}
-                                placeholder={config.binanceTestnet ? "Binance Testnet Key" : "Binance Real Key"}
-                            />
+                            <div className="relative">
+                                <Input
+                                    name="binanceKey"
+                                    type="password"
+                                    value={config.binanceKey}
+                                    onChange={handleChange}
+                                    placeholder={!config.binanceKey ? "⚠️ Key Not Set - Required" : (config.binanceTestnet ? "Binance Testnet Key" : "Binance Real Key")}
+                                    className={!config.binanceKey ? "border-red-500 bg-red-50/10 focus-visible:ring-red-500" : ""}
+                                />
+                                {!config.binanceKey && <p className="text-[10px] text-red-500 font-medium mt-1">Binance API Key is missing.</p>}
+                            </div>
                         </div>
                         <div className="space-y-2">
                             <label className="text-sm font-medium">API Secret</label>
-                            <Input
-                                name="binanceSecret"
-                                type="password"
-                                value={config.binanceSecret}
-                                onChange={handleChange}
-                                placeholder="Binance Secret"
-                            />
+                            <div className="relative">
+                                <Input
+                                    name="binanceSecret"
+                                    type="password"
+                                    value={config.binanceSecret}
+                                    onChange={handleChange}
+                                    placeholder={config.binanceSecret ? "Binance Secret" : "⚠️ Secret Not Set"}
+                                    className={!config.binanceSecret ? "border-red-500 bg-red-50/10 focus-visible:ring-red-500" : ""}
+                                />
+                            </div>
                         </div>
                     </CardContent>
                 </Card>

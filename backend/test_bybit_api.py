@@ -8,12 +8,10 @@ def test_bybit():
     if response.status_code == 200:
         data = response.json()
         if data['retCode'] == 0:
-            count = 0
-            for item in data['result']['list'][:10]:
-                print(f"Symbol: {item['symbol']}, Rate: {item.get('fundingRate')}, Next: {item.get('nextFundingTime')}")
-                if item['symbol'].endswith('USDT'):
-                    count += 1
-            print(f"Total matching symbols in first 10: {count}")
+            targets = ["1000XECUSDT", "AIOUSDT", "NAORISUSDT", "NTRNUSDT", "VICUSDT", "1000XUSDT"]
+            for item in data['result']['list']:
+                if item['symbol'] in targets:
+                    print(f"Symbol: {item['symbol']}, Rate: {item.get('fundingRate')}, Next: {item.get('nextFundingTime')}")
             print(f"Total symbols: {len(data['result']['list'])}")
         else:
             print(f"Error: {data['retMsg']}")
