@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 import time
 import hmac
 import hashlib
@@ -129,10 +130,129 @@ DEFAULT_BYBIT_API_KEY = os.getenv("BYBIT_API_KEY", "GS68TldhIYqdRUOz4V")
 DEFAULT_BYBIT_SECRET = os.getenv("BYBIT_SECRET", "b5suxCOFWQsV2IoGDZ2HnNyhxDvt4NQNAReK")
 BYBIT_DEMO_URL = os.getenv("BYBIT_DEMO_URL", "https://api-demo.bybit.com")
 
-async def fetch_binance_rates():
+# --- BINANCE WEBSOCKET CONFIG ---
+# Note: Binance testnet market data streams may use the same URL as live (stream.binancefuture.com)
+# The WS-API (for trading) uses testnet.binancefuture.com/ws-fapi/v1
+BINANCE_WS_LIVE = os.getenv("BINANCE_WS_LIVE", "wss://fstream.binance.com/ws/!markPrice@arr")
+BINANCE_WS_TESTNET = os.getenv("BINANCE_WS_TESTNET", "wss://stream.binancefuture.com/ws/!markPrice@arr")
+
+import websockets
+import threading
+
+class BinanceWebSocketManager:
+    """Manages WebSocket connection to Binance Futures for real-time mark price and funding rate."""
+    
+    def __init__(self):
+        self.data = {}  # symbol -> { markPrice, fundingRate, nextFundingTime }
+        self.is_live = False
+        self.ws = None
+        self.running = False
+        self.thread = None
+        self.loop = None
+    
+    def get_ws_url(self):
+        return BINANCE_WS_LIVE if self.is_live else BINANCE_WS_TESTNET
+    
+    async def _connect(self):
+        url = self.get_ws_url()
+        print(f"🔌 Binance WS Connecting to: {url}")
+        
+        # SSL context for development (bypass certificate verification)
+        import ssl
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+        
+        while self.running:
+            try:
+                async with websockets.connect(
+                    url, 
+                    ping_interval=30, 
+                    ping_timeout=10, 
+                    ssl=ssl_context,
+                    open_timeout=15,
+                    close_timeout=5
+                ) as ws:
+                    self.ws = ws
+                    print(f"✅ Binance WS Connected ({'LIVE' if self.is_live else 'TESTNET'})")
+                    
+                    async for message in ws:
+                        if not self.running:
+                            break
+                        try:
+                            data = json.loads(message)
+                            if isinstance(data, list):
+                                count = 0
+                                for item in data:
+                                    symbol = item.get('s', '').replace('USDT', '')
+                                    if symbol:
+                                        self.data[symbol] = {
+                                            'markPrice': float(item.get('p', 0)),
+                                            'fundingRate': float(item.get('r', 0)),
+                                            'nextFundingTime': int(item.get('T', 0))
+                                        }
+                                        count += 1
+                                if count > 0 and len(self.data) % 100 == 0:
+                                    print(f"📊 WS Data Updated: {len(self.data)} symbols")
+                        except Exception as parse_err:
+                            print(f"WS Parse Error: {parse_err}")
+                            
+            except websockets.exceptions.ConnectionClosed as e:
+                if self.running:
+                    print(f"⚠️ Binance WS Disconnected: {e}. Reconnecting in 5s...")
+                    await asyncio.sleep(5)
+            except asyncio.TimeoutError:
+                if self.running:
+                    print(f"⏱️ Binance WS Timeout. Reconnecting in 5s...")
+                    await asyncio.sleep(5)
+            except Exception as e:
+                if self.running:
+                    print(f"❌ Binance WS Error: {type(e).__name__}: {e}. Reconnecting in 5s...")
+                    await asyncio.sleep(5)
+    
+    def _run_loop(self):
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+        try:
+            self.loop.run_until_complete(self._connect())
+        except Exception as e:
+            print(f"WS Loop Error: {e}")
+        finally:
+            self.loop.close()
+    
+    def start(self, is_live=False):
+        if self.running:
+            self.stop()
+        
+        self.is_live = is_live
+        self.running = True
+        self.thread = threading.Thread(target=self._run_loop, daemon=True)
+        self.thread.start()
+        print(f"🚀 Binance WS Manager Started ({'LIVE' if is_live else 'TESTNET'})")
+    
+    def stop(self):
+        self.running = False
+        if self.ws:
+            asyncio.run_coroutine_threadsafe(self.ws.close(), self.loop)
+        if self.thread:
+            self.thread.join(timeout=2)
+        print("🛑 Binance WS Manager Stopped")
+    
+    def get_rates(self):
+        """Returns current cached rates for all symbols."""
+        return self.data
+
+# Global WS Manager Instance
+binance_ws_manager = BinanceWebSocketManager()
+
+async def fetch_binance_rates(is_live: bool = False):
     try:
+        # Switch URL based on mode
+        url = "https://fapi.binance.com/fapi/v1/premiumIndex" if is_live else "https://testnet.binancefuture.com/fapi/v1/premiumIndex"
+        print(f"DEBUG: Fetching Binance Rates from: {url}")
+        
         loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(None, requests.get, BINANCE_API)
+        response = await loop.run_in_executor(None, requests.get, url)
         if response.status_code == 200:
             data = response.json()
             rates = {}
@@ -146,7 +266,7 @@ async def fetch_binance_rates():
                     }
             return rates
     except Exception as e:
-        print(f"Binance Error: {e}")
+        print(f"Binance Error ({'Live' if is_live else 'Testnet'}): {e}")
         return {}
     return {}
 
@@ -180,17 +300,101 @@ async def fetch_bybit_rates():
         print(f"Bybit Error: {e}")
     return {}
 
+class TelegramAlertRequest(BaseModel):
+    token: str
+    chatId: str
+    message: str
+    imageUrl: Optional[str] = None
+    buttonText: Optional[str] = None
+    buttonUrl: Optional[str] = None
+
+@app.post("/api/telegram/send")
+async def send_telegram_alert(req: TelegramAlertRequest):
+    try:
+        url = f"https://api.telegram.org/bot{req.token}/"
+        payload = {
+            "chat_id": req.chatId,
+            "text": req.message,
+            "parse_mode": "Markdown"
+        }
+        
+        if req.buttonText and req.buttonUrl:
+            payload["reply_markup"] = json.dumps({
+                "inline_keyboard": [[
+                    {"text": req.buttonText, "url": req.buttonUrl}
+                ]]
+            })
+
+        if req.imageUrl:
+            payload["photo"] = req.imageUrl
+            payload["caption"] = req.message
+            del payload["text"]
+            # method = "sendPhoto" # Requires multipart if sending file, but URL works too
+            # For simplicity, we use sendMessage if no image, or sendPhoto if image URL is provided.
+            response = requests.post(url + "sendPhoto", data=payload)
+        else:
+            response = requests.post(url + "sendMessage", data=payload)
+            
+        data = response.json()
+        if data.get("ok"):
+            return {"status": "success"}
+        else:
+            return {"status": "error", "message": data.get("description", "Unknown error")}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
 @app.get("/api/rates")
-async def get_rates():
-    # Fetch both concurrently
-    binance_task = fetch_binance_rates()
-    bybit_task = fetch_bybit_rates()
+async def get_rates(is_live: bool = False, use_websocket: bool = True):
+    """
+    Returns funding rates. 
+    - If use_websocket=True and WS is running, returns cached WS data for Binance.
+    - Otherwise, falls back to REST API polling.
+    """
+    # Check if WS data is available
+    ws_data = binance_ws_manager.get_rates() if use_websocket and binance_ws_manager.running else {}
     
-    binance_rates, bybit_rates = await asyncio.gather(binance_task, bybit_task)
+    if ws_data:
+        # Transform WS data to match expected format
+        binance_rates = {}
+        for symbol, info in ws_data.items():
+            binance_rates[symbol] = {
+                "rate": info['fundingRate'],
+                "markPrice": info['markPrice'],
+                "nextFundingTime": info['nextFundingTime']
+            }
+    else:
+        # Fallback to REST API
+        binance_rates = await fetch_binance_rates(is_live)
+    
+    # Bybit always uses REST for now
+    bybit_rates = await fetch_bybit_rates()
     
     return {
         "binance": binance_rates,
-        "bybit": bybit_rates
+        "bybit": bybit_rates,
+        "source": "websocket" if ws_data else "rest"
+    }
+
+@app.post("/api/ws/start")
+async def start_websocket(is_live: bool = False):
+    """Start the Binance WebSocket connection."""
+    binance_ws_manager.start(is_live=is_live)
+    return {"status": "started", "mode": "LIVE" if is_live else "TESTNET", "url": binance_ws_manager.get_ws_url()}
+
+@app.post("/api/ws/stop")
+async def stop_websocket():
+    """Stop the Binance WebSocket connection."""
+    binance_ws_manager.stop()
+    return {"status": "stopped"}
+
+@app.get("/api/ws/status")
+async def websocket_status():
+    """Check WebSocket connection status."""
+    return {
+        "running": binance_ws_manager.running,
+        "mode": "LIVE" if binance_ws_manager.is_live else "TESTNET",
+        "url": binance_ws_manager.get_ws_url(),
+        "symbols_count": len(binance_ws_manager.data)
     }
 
 from pydantic import BaseModel
