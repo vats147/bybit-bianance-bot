@@ -5,6 +5,7 @@ import { Wallet, TrendingUp, History, Activity, Wifi, WifiOff } from "lucide-rea
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useToast } from "@/components/ui/toast";
 
 export function DashboardPage() {
     const [balanceData, setBalanceData] = useState(null); // { bybit: ..., binance: ... }
@@ -13,6 +14,7 @@ export function DashboardPage() {
     const [error, setError] = useState(null);
     const [activeBackend, setActiveBackend] = useState("primary");
     const [activeTab, setActiveTab] = useState("bybit");
+    const toast = useToast();
 
     const getBackendUrl = () => {
         const primary = localStorage.getItem("primary_backend_url") || "http://127.0.0.1:8000";
@@ -54,8 +56,9 @@ export function DashboardPage() {
             setActiveBackend("primary");
             const res = await fetch(`${primary}${endpoint}${urlSuffix}`, options);
             if (!res.ok) {
-                const errText = await res.text();
-                throw new Error(`Primary failed: ${errText}`);
+                const errData = await res.json().catch(() => ({}));
+                const errMsg = errData.detail || `Request failed (${res.status})`;
+                throw new Error(errMsg);
             }
             return await res.json();
         } catch (e) {
@@ -90,7 +93,10 @@ export function DashboardPage() {
                 if (txJson.retCode === 0) {
                     bybitTx = txJson.result.list;
                 }
-            } catch (e) { console.error("Bybit Fetch Error", e); }
+            } catch (e) {
+                console.error("Bybit Fetch Error", e);
+                toast.error(`Bybit: ${e.message}`);
+            }
 
             // --- BINANCE FETCH ---
             let binanceBal = null;
@@ -104,7 +110,7 @@ export function DashboardPage() {
                 if (Array.isArray(balJson)) {
                     binanceBal = balJson;
                 } else if (balJson.error) {
-                    // Handle error stored in object
+                    throw new Error(balJson.error.msg || "Binance error");
                 }
 
                 const txJson = await fetchWithFailover("/api/binance/orders", 'binance'); // Handles /income
@@ -112,7 +118,10 @@ export function DashboardPage() {
                 if (Array.isArray(txJson)) {
                     binanceTx = txJson;
                 }
-            } catch (e) { console.error("Binance Fetch Error", e); }
+            } catch (e) {
+                console.error("Binance Fetch Error", e);
+                toast.error(`Binance: ${e.message}`);
+            }
 
             setBalanceData({ bybit: bybitBal, binance: binanceBal });
             setTransactions({ bybit: bybitTx, binance: binanceTx });
@@ -120,6 +129,7 @@ export function DashboardPage() {
         } catch (err) {
             console.error(err);
             setError(err.message || "Failed to load dashboard data");
+            toast.error(err.message || "Failed to load dashboard data");
         } finally {
             setLoading(false);
         }
@@ -274,10 +284,6 @@ export function DashboardPage() {
                     <p className="text-muted-foreground mt-1">
                         Review Balances, P&L, and History across platforms.
                     </p>
-                </div>
-                <div className="flex items-center gap-2 text-xs font-mono bg-muted px-3 py-1 rounded-full border">
-                    {activeBackend === 'primary' ? <Wifi className="h-3 w-3 text-green-500" /> : <WifiOff className="h-3 w-3 text-amber-500" />}
-                    <span>Backend: {localStorage.getItem(`${activeBackend}_backend_url`) || "Default"}</span>
                 </div>
             </div>
 

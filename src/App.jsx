@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback, memo } from 'react';
 import { ArbitrageModal } from "@/components/ArbitrageModal";
 import { TradeSidePanel } from "./components/TradeSidePanel";
 import { DemoTradingModal } from "./components/DemoTradingModal";
@@ -9,7 +9,8 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
-import { ArrowUpDown, ExternalLink, RefreshCw, Send, AlertTriangle, LayoutDashboard, Settings, Activity } from "lucide-react";
+import { ArrowUpDown, ExternalLink, RefreshCw, Settings, AlertTriangle, LayoutDashboard, Activity, Zap } from "lucide-react";
+import { Tooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
 // --- API Helpers ---
@@ -159,8 +160,47 @@ function App() {
 
   // Filters
   const [minSpread, setMinSpread] = useState(0); // Default 0% to show all pairs
-  const [sortConfig, setSortConfig] = useState({ key: 'spread', direction: 'desc' });
+  const [showHighDiff, setShowHighDiff] = useState(false); // Filter > 0.5% Diff
+  const [sortConfig, setSortConfig] = useState({ key: 'apr', direction: 'desc' });
+
+  // Pagination
+  const [currentPage, setCurrentPage] = useState(1);
+  const itemsPerPage = 20;
+
+  // Telegram config - now loads from localStorage (configured in Settings)
   const [telegramConfig, setTelegramConfig] = useState({ token: '', chatId: '' });
+
+  // Auto-trade symbols state
+  const [autoTradeSymbols, setAutoTradeSymbols] = useState(new Set());
+
+  // Load telegram config and auto-trade symbols from localStorage
+  useEffect(() => {
+    const savedToken = localStorage.getItem("telegram_token") || '';
+    const savedChatId = localStorage.getItem("telegram_chat_id") || '';
+    setTelegramConfig({ token: savedToken, chatId: savedChatId });
+
+    const savedAutoTrade = localStorage.getItem("auto_trade_symbols");
+    if (savedAutoTrade) {
+      try {
+        setAutoTradeSymbols(new Set(JSON.parse(savedAutoTrade)));
+      } catch (e) {
+        console.error("Failed to parse auto_trade_symbols", e);
+      }
+    }
+  }, []);
+
+  const toggleAutoTrade = (symbol) => {
+    setAutoTradeSymbols(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(symbol)) {
+        newSet.delete(symbol);
+      } else {
+        newSet.add(symbol);
+      }
+      localStorage.setItem("auto_trade_symbols", JSON.stringify([...newSet]));
+      return newSet;
+    });
+  };
 
   // Modal State
   const [selectedOpportunity, setSelectedOpportunity] = useState(null);
@@ -197,7 +237,7 @@ function App() {
     };
 
     fetchMetadata();
-    const pollId = setInterval(fetchMetadata, 10000); // Poll every 10s to ensure we get data
+    const pollId = setInterval(fetchMetadata, 30000); // Poll every 30s (was 10s)
 
     return () => clearInterval(pollId);
   }, []);
@@ -247,15 +287,23 @@ function App() {
       // but for now let's just filter out completely empty ones
       .filter(item => item.symbol);
 
-    setData(merged);
+    // Limit to top 200 symbols to avoid memory issues
+    const topSymbols = merged
+      .sort((a, b) => Math.abs(b.spread) - Math.abs(a.spread))
+      .slice(0, 200);
+
+    setData(topSymbols);
     setLastUpdated(new Date());
-    checkAndSendAlerts(merged);
+    // Only send alerts if we have meaningful data
+    if (topSymbols.length > 0 && topSymbols[0].spread > 0.01) {
+      checkAndSendAlerts(topSymbols);
+    }
   };
   // ... keep existing useEffects ...
 
   useEffect(() => {
-    // Throttled UI updater
-    const interval = setInterval(updateTableData, 1000);
+    // Throttled UI updater - reduced from 1s to 3s for performance
+    const interval = setInterval(updateTableData, 3000);
     return () => clearInterval(interval);
   }, []);
 
@@ -337,7 +385,7 @@ function App() {
     };
 
     fetchData(); // Initial run
-    const pollInterval = setInterval(fetchData, 10000); // Poll every 10s as backup
+    const pollInterval = setInterval(fetchData, 15000); // Poll every 15s (was 10s)
 
     // One-time fetch for funding intervals
     const fetchIntervals = async () => {
@@ -436,6 +484,9 @@ function App() {
       const matchesSpread = item.spread >= parseFloat(minSpread);
       const matchesSearch = item.symbol.toLowerCase().includes(searchQuery.toLowerCase());
 
+      // High Diff Filter (> 0.5%)
+      const matchesHighDiff = showHighDiff ? Math.abs(item.diff) > 0.5 : true;
+
       // Filter by Testnet Availability if Testnet is ON
       // If we are in testnet mode, and the symbol is NOT in the allowed list, hide it.
       // But only if we have fetched the list (size > 0).
@@ -444,9 +495,13 @@ function App() {
         matchesTestnet = testnetSymbols.has(item.symbol);
       }
 
-      return matchesSpread && matchesSearch && matchesTestnet;
+      return matchesSpread && matchesSearch && matchesTestnet && matchesHighDiff;
     });
-  }, [data, sortConfig, minSpread, searchQuery, isTestnet, testnetSymbols]);
+  }, [data, sortConfig, minSpread, searchQuery, isTestnet, testnetSymbols, showHighDiff]);
+
+  // Pagination Logic
+  const totalPages = Math.ceil(sortedData.length / itemsPerPage);
+  const paginatedData = sortedData.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage);
 
   const requestSort = (key) => {
     let direction = 'ascending';
@@ -492,9 +547,49 @@ function App() {
     }
   };
 
+  const handleCloseAllTrades = async () => {
+    if (!confirm("⚠️ DANGER: This will close ALL open positions on Bybit and Binance immediately.\n\nAre you sure you want to proceed?")) return;
+
+    const bybitKey = localStorage.getItem("user_bybit_key");
+    const bybitSecret = localStorage.getItem("user_bybit_secret");
+    const binanceKey = localStorage.getItem("user_binance_key");
+    const binanceSecret = localStorage.getItem("user_binance_secret");
+    const backendUrl = localStorage.getItem("primary_backend_url") || "http://127.0.0.1:8000";
+
+    try {
+      const res = await fetch(`${backendUrl}/api/close-all-positions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-User-Bybit-Key": bybitKey || "",
+          "X-User-Bybit-Secret": bybitSecret || "",
+          "X-User-Binance-Key": binanceKey || "",
+          "X-User-Binance-Secret": binanceSecret || ""
+        }
+      });
+      const data = await res.json();
+
+      let msg = "Close All Result:\n";
+      if (data.bybit && data.bybit.length) msg += `Bybit: ${data.bybit.join(", ")}\n`;
+      if (data.binance && data.binance.length) msg += `Binance: ${data.binance.join(", ")}`;
+
+      if (!data.bybit?.length && !data.binance?.length) msg = "No open positions found to close.";
+
+      alert(msg);
+
+    } catch (e) {
+      console.error(e);
+      alert(`Failed to close all trades: ${e.message}`);
+    }
+  };
+
   return (
-    <div className="min-h-screen bg-background text-foreground p-4 md:p-8 font-sans">
-      <div className="max-w-7xl mx-auto space-y-6">
+    <div className="min-h-screen bg-background text-foreground transition-all duration-300 ease-in-out">
+      {/* Wrapper to handle Layout Shift */}
+      <div
+        className="max-w-7xl mx-auto space-y-6 p-4 md:p-8 transition-all duration-300 ease-in-out"
+        style={{ marginRight: selectedOpportunity ? '400px' : 'auto' }}
+      >
 
         {/* Header Section */}
         <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
@@ -507,7 +602,14 @@ function App() {
             </p>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-4">
+            {/* Live Mode Toggle (moved here) */}
+            <div className="flex items-center gap-2 bg-card border px-3 py-1.5 rounded-lg shadow-sm">
+              <span className="text-sm font-medium">Live Mode</span>
+              <Switch checked={isLive} onCheckedChange={setIsLive} />
+              <span className={cn("inline-block w-2 h-2 rounded-full animate-pulse", isLive ? "bg-green-500" : "bg-gray-400")}></span>
+            </div>
+
             {/* Tab Navigation */}
             <div className="flex p-1 bg-muted rounded-lg">
               <Button
@@ -543,11 +645,17 @@ function App() {
           <>
             <div className="flex justify-between items-center bg-card p-2 rounded-lg border">
               <div className="flex items-center gap-2 ml-2">
-                <span className="text-sm font-medium">Live Mode</span>
-                <Switch checked={isLive} onCheckedChange={setIsLive} />
-                <span className={`text-[10px] px-1 rounded border ml-2 ${metadataCount > 0 ? "bg-green-500/10 text-green-500 border-green-500/50" : "bg-red-500/10 text-red-500 border-red-500/50"}`}>
+                {/* Metadata Status */}
+                <span className={`text-[10px] px-1 rounded border ${metadataCount > 0 ? "bg-green-500/10 text-green-500 border-green-500/50" : "bg-red-500/10 text-red-500 border-red-500/50"}`}>
                   Meta: {metadataCount}
                 </span>
+                {/* Filter Checkbox */}
+                <div className="flex items-center gap-2 ml-4">
+                  <Switch id="high-diff" checked={showHighDiff} onCheckedChange={setShowHighDiff} />
+                  <label htmlFor="high-diff" className="text-sm font-medium cursor-pointer">
+                    Diff &gt; 0.5%
+                  </label>
+                </div>
               </div>
               <div className="flex items-center gap-2">
                 <span className="text-xs text-muted-foreground mr-2">
@@ -622,88 +730,62 @@ function App() {
               </Card>
             </div>
 
-            {/* Telegram Config */}
-            <Card className="border-blue-500/20 bg-blue-500/5">
-              <CardHeader className="py-4">
-                <CardTitle className="text-sm font-medium flex items-center gap-2">
-                  <Send className="h-4 w-4" /> Telegram Alert Configuration
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="pb-4">
-                <div className="flex flex-col md:flex-row gap-4">
-                  <Input
-                    placeholder="Bot Token"
-                    value={telegramConfig.token}
-                    onChange={e => setTelegramConfig({ ...telegramConfig, token: e.target.value })}
-                    className="bg-background"
-                  />
-                  <Input
-                    placeholder="Chat ID"
-                    value={telegramConfig.chatId}
-                    onChange={e => setTelegramConfig({ ...telegramConfig, chatId: e.target.value })}
-                    className="bg-background"
-                  />
-                  <Button variant="secondary" onClick={() => checkAndSendAlerts(data)}>
-                    Test Alert
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
-
 
             {/* Main Table */}
             <Card className="overflow-hidden border-t-4 border-t-primary">
-              <div className="p-1 overflow-x-auto relative">
+              <div className="p-1 overflow-x-auto relative min-h-[500px]">
                 <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead className="w-[100px] font-bold text-primary sticky left-0 z-20 bg-background shadow-[1px_0_5px_rgba(0,0,0,0.1)]">Symbol</TableHead>
-                      <TableHead className="min-w-[100px]">Mark Price</TableHead>
-                      <TableHead className="min-w-[120px]">Funding / Intervals</TableHead>
-                      <TableHead className="text-right cursor-pointer hover:text-primary transition-colors hover:bg-muted/50" onClick={() => requestSort('bybitRateRaw')}>
-                        Bybit (Int.) {sortConfig.key === 'bybitRateRaw' && (sortConfig.direction === 'ascending' ? '↑' : '↓')}
-                      </TableHead>
+                  <TableHeader className="sticky top-0 z-30 bg-background">
+                    <TableRow className="bg-muted/50">
+                      <TableHead className="w-[100px] font-bold text-primary sticky left-0 z-20 bg-muted/50 shadow-[1px_0_5px_rgba(0,0,0,0.1)]">Symbol</TableHead>
+                      <TableHead className="min-w-[80px] hidden sm:table-cell">Price</TableHead>
+                      <TableHead className="min-w-[80px]">Funding</TableHead>
                       <TableHead className="text-right cursor-pointer hover:text-primary transition-colors hover:bg-muted/50" onClick={() => requestSort('binanceRateRaw')}>
-                        Binance (Int.) {sortConfig.key === 'binanceRateRaw' && (sortConfig.direction === 'ascending' ? '↑' : '↓')}
+                        Binance {sortConfig.key === 'binanceRateRaw' && (sortConfig.direction === 'ascending' ? '↑' : '↓')}
                       </TableHead>
-                      <TableHead className="text-right cursor-pointer hover:text-primary transition-colors hover:bg-muted/50" onClick={() => requestSort('spread')}>
-                        Spread {sortConfig.key === 'spread' && (sortConfig.direction === 'ascending' ? '↑' : '↓')}
+                      <TableHead className="text-right cursor-pointer hover:text-primary transition-colors hover:bg-muted/50" onClick={() => requestSort('bybitRateRaw')}>
+                        Bybit {sortConfig.key === 'bybitRateRaw' && (sortConfig.direction === 'ascending' ? '↑' : '↓')}
+                      </TableHead>
+                      <TableHead className="text-right cursor-pointer hover:text-primary transition-colors hover:bg-muted/50" onClick={() => requestSort('diff')}>
+                        Diff {sortConfig.key === 'diff' && (sortConfig.direction === 'ascending' ? '↑' : '↓')}
                       </TableHead>
                       <TableHead className="text-right cursor-pointer hover:text-primary transition-colors hover:bg-muted/50" onClick={() => requestSort('apr')}>
                         APR {sortConfig.key === 'apr' && (sortConfig.direction === 'ascending' ? '↑' : '↓')}
                       </TableHead>
-                      <TableHead className="text-right">Action</TableHead>
+                      <TableHead className="text-right sticky right-0 z-20 bg-muted/50">Action</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {loading ? (
                       <TableRow>
-                        <TableCell colSpan={7} className="h-24 text-center">
+                        <TableCell colSpan={8} className="h-24 text-center">
                           <div className="flex justify-center items-center gap-2">
                             <RefreshCw className="h-5 w-5 animate-spin text-muted-foreground" />
                             <span className="text-muted-foreground">Fetching market data...</span>
                           </div>
                         </TableCell>
                       </TableRow>
-                    ) : sortedData.length === 0 ? (
+                    ) : paginatedData.length === 0 ? (
                       <TableRow>
-                        <TableCell colSpan={7} className="h-24 text-center text-muted-foreground">
+                        <TableCell colSpan={8} className="h-24 text-center text-muted-foreground">
                           No arbitrage opportunities found matching criteria.
                         </TableCell>
                       </TableRow>
                     ) : (
-                      sortedData.map((item) => (
+                      paginatedData.map((item) => (
                         <TableRow key={item.symbol} className="hover:bg-muted/30">
                           <TableCell className="font-bold sticky left-0 z-10 bg-background shadow-[1px_0_5px_rgba(0,0,0,0.05)] border-r">
                             <div className="flex items-center gap-2">
+                              {autoTradeSymbols.has(item.symbol) && (
+                                <Zap className="w-4 h-4 text-yellow-500 animate-pulse" title="Auto-Trade Enabled" />
+                              )}
                               <img
                                 src={`https://raw.githubusercontent.com/spothq/cryptocurrency-icons/master/128/color/${item.symbol.toLowerCase()}.png`}
                                 alt={item.symbol}
                                 className="w-6 h-6 rounded-full bg-white"
                                 onError={(e) => {
-                                  // Try generic Binance-like URL logic or fallback
                                   e.target.onerror = null;
-                                  e.target.src = `https://ui-avatars.com/api/?name=${item.symbol}&background=F3BA2F&color=fff&size=64&font-size=0.4&bold=true`; // Binance yellow fallback
+                                  e.target.src = `https://ui-avatars.com/api/?name=${item.symbol}&background=F3BA2F&color=fff&size=64&font-size=0.4&bold=true`;
                                 }}
                               />
                               <span className="text-foreground">{item.symbol}</span>
@@ -730,40 +812,56 @@ function App() {
                               );
                             })()}
                           </TableCell>
-                          <TableCell className={cn("font-medium", item.binanceRate > 0 ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400")}>
+                          <TableCell className={cn("text-right font-medium", item.binanceRate > 0 ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400")}>
                             {item.binanceRate.toFixed(4)}%
                           </TableCell>
-                          <TableCell className={cn("font-medium", item.bybitRate > 0 ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400")}>
+                          <TableCell className={cn("text-right font-medium", item.bybitRate > 0 ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400")}>
                             {item.bybitRate ? item.bybitRate.toFixed(4) : '0.0000'}%
                           </TableCell>
-                          <TableCell className="font-mono font-bold text-blue-600 dark:text-blue-400">
-                            {item.spread.toFixed(4)}%
+                          <TableCell className={cn("text-right font-bold", item.diff > 0 ? "text-green-600 dark:text-green-400" : item.diff < 0 ? "text-red-600 dark:text-red-400" : "text-muted-foreground")}>
+                            {item.diff > 0 ? '+' : ''}{item.diff.toFixed(4)}%
                           </TableCell>
-                          <TableCell className={cn("font-medium", item.diff > 0 ? "text-green-600 dark:text-green-400" : item.diff < 0 ? "text-red-600 dark:text-red-400" : "text-muted-foreground")}>
-                            {item.diff.toFixed(4)}%
-                          </TableCell>
-                          <TableCell className="font-medium">
+                          <TableCell className="text-right font-bold text-blue-600 dark:text-blue-400">
                             {item.apr.toFixed(2)}%
                           </TableCell>
                           <TableCell className="text-right sticky right-0 z-10 bg-background shadow-[-1px_0_5px_rgba(0,0,0,0.05)] border-l">
-                            <div className="flex justify-end gap-2">
-                              <Button
-                                size="sm"
-                                className="h-8 bg-blue-600 hover:bg-blue-700 text-white font-bold px-3 shadow-sm border border-blue-500/50"
-                                onClick={() => setSelectedOpportunity(item)}
-                              >
-                                Trade
-                              </Button>
-                              <Button size="icon" variant="outline" className="h-8 w-8 p-0 border-yellow-500/50 hover:bg-yellow-500/10" asChild title="Binance">
-                                <a href={`https://www.binance.com/en/futures/${item.symbol}USDT`} target="_blank" rel="noopener noreferrer">
-                                  <img src="https://bin.bnbstatic.com/static/images/common/favicon.ico" alt="Binance" className="w-4 h-4" />
-                                </a>
-                              </Button>
-                              <Button size="icon" variant="outline" className="h-8 w-8 p-0 border-purple-500/50 hover:bg-purple-500/10" asChild title="Bybit">
-                                <a href={`https://www.bybit.com/trade/usdt/${item.symbol}USDT`} target="_blank" rel="noopener noreferrer">
-                                  <img src="https://www.bybit.com/favicon.ico" alt="Bybit" className="w-4 h-4" />
-                                </a>
-                              </Button>
+                            <div className="flex justify-end gap-1">
+                              <Tooltip content="Open Trade Panel" side="top">
+                                <Button
+                                  size="sm"
+                                  className="h-8 bg-blue-600 hover:bg-blue-700 text-white font-bold px-2 sm:px-3 shadow-sm border border-blue-500/50"
+                                  onClick={() => setSelectedOpportunity(item)}
+                                >
+                                  Trade
+                                </Button>
+                              </Tooltip>
+                              <Tooltip content="Open Binance Futures" side="top">
+                                <Button size="icon" variant="outline" className="h-8 w-8 p-0 border-yellow-500/50 hover:bg-yellow-500/10" asChild>
+                                  <a href={`https://www.binance.com/en/futures/${item.symbol}USDT`} target="_blank" rel="noopener noreferrer">
+                                    <img src="https://bin.bnbstatic.com/static/images/common/favicon.ico" alt="Binance" className="w-4 h-4" />
+                                  </a>
+                                </Button>
+                              </Tooltip>
+                              <Tooltip content="Open Bybit" side="top">
+                                <Button size="icon" variant="outline" className="h-8 w-8 p-0 border-purple-500/50 hover:bg-purple-500/10" asChild>
+                                  <a href={`https://www.bybit.com/trade/usdt/${item.symbol}USDT`} target="_blank" rel="noopener noreferrer">
+                                    <img src="https://www.bybit.com/favicon.ico" alt="Bybit" className="w-4 h-4" />
+                                  </a>
+                                </Button>
+                              </Tooltip>
+                              <Tooltip content="Open Both Exchanges" side="top">
+                                <Button
+                                  size="icon"
+                                  variant="outline"
+                                  className="h-8 w-8 p-0 border-green-500/50 hover:bg-green-500/10"
+                                  onClick={() => {
+                                    window.open(`https://www.binance.com/en/futures/${item.symbol}USDT`, '_blank');
+                                    window.open(`https://www.bybit.com/trade/usdt/${item.symbol}USDT`, '_blank');
+                                  }}
+                                >
+                                  <ExternalLink className="w-4 h-4 text-green-500" />
+                                </Button>
+                              </Tooltip>
                             </div>
                           </TableCell>
                         </TableRow>
@@ -772,13 +870,31 @@ function App() {
                   </TableBody>
                 </Table>
               </div>
+
+              {/* Pagination Controls */}
+              {totalPages > 1 && (
+                <div className="flex items-center justify-center gap-2 p-4 border-t">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                    disabled={currentPage === 1}
+                  >
+                    Previous
+                  </Button>
+                  <span className="text-sm font-medium">Page {currentPage} of {totalPages}</span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                    disabled={currentPage === totalPages}
+                  >
+                    Next
+                  </Button>
+                </div>
+              )}
             </Card>
 
-
-// ... existing imports
-            import {TradeSidePanel} from "./components/TradeSidePanel";
-
-            // ... existing code ...
 
             {/* Modal - Replaced/Augmented with Side Panel */}
             {/* Keeping ArbitrageModal logic if needed but user requested Trade to open Side Panel */}

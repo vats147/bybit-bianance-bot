@@ -3,7 +3,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
-import { Save, Server, Shield } from "lucide-react";
+import { Save, Server, Shield, Send } from "lucide-react";
 
 export function SettingsPage() {
     const [config, setConfig] = useState({
@@ -13,7 +13,9 @@ export function SettingsPage() {
         apiSecret: "", // Bybit
         binanceKey: "",
         binanceSecret: "",
-        binanceTestnet: true
+        binanceTestnet: true,
+        telegramToken: "",
+        telegramChatId: ""
     });
 
     useEffect(() => {
@@ -26,6 +28,8 @@ export function SettingsPage() {
         const savedBinanceKey = localStorage.getItem("user_binance_key");
         const savedBinanceSecret = localStorage.getItem("user_binance_secret");
         const savedBinanceTestnet = localStorage.getItem("user_binance_testnet");
+        const savedTelegramToken = localStorage.getItem("telegram_token");
+        const savedTelegramChatId = localStorage.getItem("telegram_chat_id");
 
         setConfig({
             primaryBackendUrl: savedPrimary || "https://a0ecbd4102e9.ngrok-free.app",
@@ -34,7 +38,9 @@ export function SettingsPage() {
             apiSecret: savedSecret || "",
             binanceKey: savedBinanceKey || "",
             binanceSecret: savedBinanceSecret || "",
-            binanceTestnet: savedBinanceTestnet === "false" ? false : true
+            binanceTestnet: savedBinanceTestnet === "false" ? false : true,
+            telegramToken: savedTelegramToken || "",
+            telegramChatId: savedTelegramChatId || ""
         });
     }, []);
 
@@ -55,6 +61,8 @@ export function SettingsPage() {
         localStorage.setItem("user_binance_key", config.binanceKey);
         localStorage.setItem("user_binance_secret", config.binanceSecret);
         localStorage.setItem("user_binance_testnet", config.binanceTestnet);
+        localStorage.setItem("telegram_token", config.telegramToken);
+        localStorage.setItem("telegram_chat_id", config.telegramChatId);
 
         alert("Configuration Saved!");
         window.location.reload();
@@ -173,6 +181,42 @@ export function SettingsPage() {
                                 placeholder="Binance Secret"
                             />
                         </div>
+                    </CardContent>
+                </Card>
+
+                {/* TELEGRAM ALERTS CONFIGURATION */}
+                <Card className="md:col-span-2 shadow-md border-blue-500/20 bg-blue-500/5">
+                    <CardHeader>
+                        <CardTitle className="flex items-center gap-2">
+                            <Send className="h-5 w-5 text-blue-500" />
+                            Telegram Alerts
+                        </CardTitle>
+                        <CardDescription>Configure Telegram bot for real-time alerts.</CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-4">
+                        <div className="grid gap-4 md:grid-cols-2">
+                            <div className="space-y-2">
+                                <label className="text-sm font-medium">Bot Token</label>
+                                <Input
+                                    name="telegramToken"
+                                    value={config.telegramToken}
+                                    onChange={handleChange}
+                                    placeholder="123456789:ABCdefGHIjklMNO..."
+                                />
+                            </div>
+                            <div className="space-y-2">
+                                <label className="text-sm font-medium">Chat ID</label>
+                                <Input
+                                    name="telegramChatId"
+                                    value={config.telegramChatId}
+                                    onChange={handleChange}
+                                    placeholder="-1001234567890"
+                                />
+                            </div>
+                        </div>
+                        <p className="text-xs text-muted-foreground">
+                            Create a bot via @BotFather and get your chat ID from @userinfobot.
+                        </p>
                     </CardContent>
                 </Card>
             </div>
