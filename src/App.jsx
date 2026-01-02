@@ -269,8 +269,8 @@ function App() {
 
         // Interval Lookup via Ref
         const intervals = intervalMapRef.current[item.symbol] || {};
-        const bybitInt = intervals.bybit || 8;
-        const binanceInt = intervals.binance || 8;
+        const bybitInt = intervals.bybit || null;
+        const binanceInt = intervals.binance || null;
 
         return {
           ...item,
@@ -421,7 +421,9 @@ function App() {
         Object.keys(c).forEach(s => {
           if (!dataRef.current[s]) dataRef.current[s] = { symbol: s };
           dataRef.current[s].bybitRate = c[s].rate;
-          if (c[s].markPrice) dataRef.current[s].markPrice = c[s].markPrice; // Use Bybit price if available? Mostly stick to Binance
+          if (c[s].markPrice && !dataRef.current[s].markPrice) dataRef.current[s].markPrice = c[s].markPrice;
+          if (c[s].nextFundingTime && !dataRef.current[s].nextFundingTime) dataRef.current[s].nextFundingTime = c[s].nextFundingTime;
+          if (c[s].fundingIntervalHours) dataRef.current[s].fundingIntervalHours = c[s].fundingIntervalHours;
         });
 
         // If this was the first load, turn off loading
@@ -693,9 +695,19 @@ function App() {
           </div>
 
           <div className="flex items-center gap-4">
+            {/* Mode Badge */}
+            <div className={cn(
+              "px-3 py-1.5 rounded-lg text-xs font-bold uppercase tracking-widest border shadow-sm",
+              isLive
+                ? "bg-green-500/10 text-green-600 border-green-500/20"
+                : "bg-amber-500/10 text-amber-600 border-amber-500/20"
+            )}>
+              {isLive ? "Mainnet" : "Testnet"}
+            </div>
+
             {/* Live Mode Toggle (moved here) */}
             <div className="flex items-center gap-2 bg-card border px-3 py-1.5 rounded-lg shadow-sm">
-              <span className="text-sm font-medium">Live Mode</span>
+              <span className="text-sm font-medium">Live Toggle</span>
               <Switch checked={isLive} onCheckedChange={setIsLive} />
               <span className={cn("inline-block w-2 h-2 rounded-full animate-pulse", isLive ? "bg-green-500" : "bg-gray-400")}></span>
             </div>
@@ -894,9 +906,9 @@ function App() {
 
                               return (
                                 <div className="flex flex-col">
-                                  <span className="text-xs">{h}h {m}m</span>
-                                  <span className="text-[10px] text-muted-foreground font-semibold">
-                                    Bin: {item.intervals?.binance}h / Byb: {item.intervals?.bybit}h
+                                  <span className="text-xs font-mono">{h}h {m}m</span>
+                                  <span className="text-[9px] text-muted-foreground font-semibold uppercase leading-tight">
+                                    Bn: {item.intervals?.binance || '?'}h | Bb: {item.intervals?.bybit || '?'}h
                                   </span>
                                 </div>
                               );

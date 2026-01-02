@@ -103,7 +103,9 @@ export function ArbitrageModal({ isOpen, onClose, data }) {
 
     // Profit for 24h (Dynamic)
     // Default to 8h interval (3 payments/day) if unknown
-    const intervalHours = data.fundingIntervalHours || 8;
+    // We favor the shorter interval for estimation if they differ? 
+    // Usually they match. We use Bybit's as primary for calculations involving Bybit legs.
+    const intervalHours = data.intervals?.bybit || data.intervals?.binance || 8;
     const paymentsPerDay = 24 / intervalHours;
     const dailyProfit = profitPerInterval * paymentsPerDay;
 

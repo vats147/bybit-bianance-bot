@@ -223,11 +223,13 @@ class BinanceWebSocketManager:
             print(f"WS Loop Error: {e}")
         finally:
             self.loop.close()
-    
+
     def start(self, is_live=False):
         if self.running:
             self.stop()
         
+        # Clear stale data when switching modes
+        self.data = {}
         self.is_live = is_live
         self.running = True
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
@@ -274,12 +276,14 @@ async def fetch_binance_rates(is_live: bool = False):
         return {}
     return {}
 
-async def fetch_bybit_rates():
+async def fetch_bybit_rates(is_live: bool = False):
     try:
         loop = asyncio.get_event_loop()
         params = {"category": "linear"}
+        # Usually Bybit tickers are same on testnet/demo, but we use demo URL if not live for consistency
+        url = BYBIT_API_URL # "https://api.bybit.com/v5/market/tickers" 
         
-        response = await loop.run_in_executor(None, functools.partial(requests.get, BYBIT_API_URL, params=params))
+        response = await loop.run_in_executor(None, functools.partial(requests.get, url, params=params))
         
         if response.status_code == 200:
             data = response.json()
@@ -292,10 +296,14 @@ async def fetch_bybit_rates():
                         
                         fr = item.get('fundingRate', '0')
                         mp = item.get('markPrice', '0')
+                        nft = item.get('nextFundingTime', '0')
+                        fih = item.get('fundingIntervalHour', '8')
                         
                         rates[symbol] = {
                             "rate": float(fr) if fr else 0.0,
-                            "markPrice": float(mp) if mp else 0.0
+                            "markPrice": float(mp) if mp else 0.0,
+                            "nextFundingTime": int(nft) if nft else 0,
+                            "fundingIntervalHours": int(fih) if fih else 8
                         }
                 return rates
             else:
@@ -370,8 +378,8 @@ async def get_rates(is_live: bool = False, use_websocket: bool = True):
         # Fallback to REST API
         binance_rates = await fetch_binance_rates(is_live)
     
-    # Bybit always uses REST for now
-    bybit_rates = await fetch_bybit_rates()
+    # Bybit
+    bybit_rates = await fetch_bybit_rates(is_live)
     
     return {
         "binance": binance_rates,
