@@ -128,6 +128,10 @@ import functools
 
 # Bybit Configuration
 BYBIT_API_URL = "https://api.bybit.com/v5/market/tickers"
+BYBIT_API_TESTNET_URL = "https://api-testnet.bybit.com/v5/market/tickers"
+
+BYBIT_WS_LIVE = "wss://stream.bybit.com/v5/public/linear"
+BYBIT_WS_TESTNET = "wss://stream-testnet.bybit.com/v5/public/linear"
 
 # Default Keys from Env or Hardcoded (Fallback)
 DEFAULT_BYBIT_API_KEY = os.getenv("BYBIT_API_KEY", "GS68TldhIYqdRUOz4V")
@@ -253,6 +257,117 @@ class BinanceWebSocketManager:
 # Global WS Manager Instance
 binance_ws_manager = BinanceWebSocketManager()
 
+class BybitWebSocketManager:
+    """Manages WebSocket connection to Bybit for real-time funding rates."""
+    
+    def __init__(self):
+        self.data = {}  # symbol -> { markPrice, fundingRate, nextFundingTime, fundingIntervalHours }
+        self.is_live = False
+        self.ws = None
+        self.running = False
+        self.thread = None
+        self.loop = None
+    
+    def get_ws_url(self):
+        return BYBIT_WS_LIVE if self.is_live else BYBIT_WS_TESTNET
+    
+    async def _connect(self):
+        url = self.get_ws_url()
+        print(f"🔌 Bybit WS Connecting to: {url}")
+        
+        import ssl
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+        
+        while self.running:
+            try:
+                async with websockets.connect(
+                    url, 
+                    ping_interval=20, 
+                    ping_timeout=10, 
+                    ssl=ssl_context
+                ) as ws:
+                    self.ws = ws
+                    print(f"✅ Bybit WS Connected ({'LIVE' if self.is_live else 'TESTNET'})")
+                    
+                    # Subscribe to tickers for all USDT pairs
+                    # Bybit requires subscription
+                    subscribe_msg = {
+                        "op": "subscribe",
+                        "args": ["tickers.USDT"] # Linear tickers
+                    }
+                    await ws.send(json.dumps(subscribe_msg))
+                    
+                    async for message in ws:
+                        if not self.running:
+                            break
+                        try:
+                            msg_data = json.loads(message)
+                            if "topic" in msg_data and msg_data["topic"].startswith("tickers"):
+                                data = msg_data.get("data", {})
+                                symbol = data.get("symbol", "")
+                                if symbol.endswith("USDT"):
+                                    norm_symbol = symbol.replace("USDT", "")
+                                    
+                                    # Update if data is present (Bybit sends delta updates)
+                                    if norm_symbol not in self.data:
+                                        self.data[norm_symbol] = {}
+                                        
+                                    if "fundingRate" in data:
+                                        self.data[norm_symbol]["fundingRate"] = float(data["fundingRate"])
+                                    if "markPrice" in data:
+                                        self.data[norm_symbol]["markPrice"] = float(data["markPrice"])
+                                    if "nextFundingTime" in data:
+                                        self.data[norm_symbol]["nextFundingTime"] = int(data["nextFundingTime"])
+                                    
+                                    # Default interval if not in ticker (often not in tickers)
+                                    if "fundingIntervalHours" not in self.data[norm_symbol]:
+                                         self.data[norm_symbol]["fundingIntervalHours"] = 8
+                                         
+                        except Exception as parse_err:
+                            pass # Silent for high frequency
+                            
+            except Exception as e:
+                if self.running:
+                    print(f"❌ Bybit WS Error: {e}. Reconnecting in 5s...")
+                    await asyncio.sleep(5)
+    
+    def _run_loop(self):
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+        try:
+            self.loop.run_until_complete(self._connect())
+        except Exception as e:
+            print(f"Bybit WS Loop Error: {e}")
+        finally:
+            self.loop.close()
+
+    def start(self, is_live=False):
+        if self.running:
+            self.stop()
+        self.data = {}
+        self.is_live = is_live
+        self.running = True
+        self.thread = threading.Thread(target=self._run_loop, daemon=True)
+        self.thread.start()
+        print(f"🚀 Bybit WS Manager Started ({'LIVE' if is_live else 'TESTNET'})")
+    
+    def stop(self):
+        self.running = False
+        if self.ws:
+            asyncio.run_coroutine_threadsafe(self.ws.close(), self.loop)
+        if self.thread:
+            self.thread.join(timeout=2)
+        print("🛑 Bybit WS Manager Stopped")
+    
+    def get_rates(self):
+        return self.data
+
+# Global instances
+binance_ws_manager = BinanceWebSocketManager()
+bybit_ws_manager = BybitWebSocketManager()
+
 async def fetch_binance_rates(is_live: bool = False):
     try:
         # Switch URL based on mode
@@ -282,8 +397,9 @@ async def fetch_bybit_rates(is_live: bool = False):
     try:
         loop = asyncio.get_event_loop()
         params = {"category": "linear"}
-        # Usually Bybit tickers are same on testnet/demo, but we use demo URL if not live for consistency
-        url = BYBIT_API_URL # "https://api.bybit.com/v5/market/tickers" 
+        # Switch URL based on mode
+        url = BYBIT_API_URL if is_live else BYBIT_API_TESTNET_URL
+        print(f"DEBUG: Fetching Bybit Rates from: {url}")
         
         response = await loop.run_in_executor(None, functools.partial(requests.get, url, params=params))
         
@@ -360,56 +476,66 @@ async def send_telegram_alert(req: TelegramAlertRequest):
 @app.get("/api/rates")
 async def get_rates(is_live: bool = False, use_websocket: bool = True):
     """
-    Returns funding rates. 
-    - If use_websocket=True and WS is running, returns cached WS data for Binance.
-    - Otherwise, falls back to REST API polling.
+    Returns funding rates from both Binance and Bybit. 
+    Prioritizes WebSocket data if available.
     """
-    # Check if WS data is available
-    ws_data = binance_ws_manager.get_rates() if use_websocket and binance_ws_manager.running else {}
-    
-    if ws_data:
-        # Transform WS data to match expected format
-        binance_rates = {}
-        for symbol, info in ws_data.items():
-            binance_rates[symbol] = {
-                "rate": info['fundingRate'],
-                "markPrice": info['markPrice'],
-                "nextFundingTime": info['nextFundingTime']
-            }
+    # 1. Binance Data
+    bn_ws_data = binance_ws_manager.get_rates() if use_websocket and binance_ws_manager.running else {}
+    if bn_ws_data:
+        binance_rates = {sym: {"rate": info['fundingRate'], "markPrice": info['markPrice'], "nextFundingTime": info['nextFundingTime']} 
+                         for sym, info in bn_ws_data.items()}
     else:
-        # Fallback to REST API
         binance_rates = await fetch_binance_rates(is_live)
     
-    # Bybit
-    bybit_rates = await fetch_bybit_rates(is_live)
-
+    # 2. Bybit Data
+    bb_ws_data = bybit_ws_manager.get_rates() if use_websocket and bybit_ws_manager.running else {}
+    if bb_ws_data:
+        bybit_rates = {sym: {"rate": info['fundingRate'], "markPrice": info['markPrice'], "nextFundingTime": info['nextFundingTime'], "fundingIntervalHours": info.get('fundingIntervalHours', 8)} 
+                       for sym, info in bb_ws_data.items()}
+    else:
+        bybit_rates = await fetch_bybit_rates(is_live)
     
     return {
         "binance": binance_rates,
         "bybit": bybit_rates,
-        "source": "websocket" if ws_data else "rest"
+        "source": "websocket" if (bn_ws_data or bb_ws_data) else "rest"
     }
 
 @app.post("/api/ws/start")
 async def start_websocket(is_live: bool = False):
-    """Start the Binance WebSocket connection."""
+    """Start both Binance and Bybit WebSocket connections."""
     binance_ws_manager.start(is_live=is_live)
-    return {"status": "started", "mode": "LIVE" if is_live else "TESTNET", "url": binance_ws_manager.get_ws_url()}
+    bybit_ws_manager.start(is_live=is_live)
+    return {
+        "status": "started", 
+        "mode": "LIVE" if is_live else "TESTNET",
+        "binance_url": binance_ws_manager.get_ws_url(),
+        "bybit_url": bybit_ws_manager.get_ws_url()
+    }
 
 @app.post("/api/ws/stop")
 async def stop_websocket():
-    """Stop the Binance WebSocket connection."""
+    """Stop both Binance and Bybit WebSocket connections."""
     binance_ws_manager.stop()
+    bybit_ws_manager.stop()
     return {"status": "stopped"}
 
 @app.get("/api/ws/status")
 async def websocket_status():
-    """Check WebSocket connection status."""
+    """Check WebSocket connection status for both exchanges."""
     return {
-        "running": binance_ws_manager.running,
-        "mode": "LIVE" if binance_ws_manager.is_live else "TESTNET",
-        "url": binance_ws_manager.get_ws_url(),
-        "symbols_count": len(binance_ws_manager.data)
+        "binance": {
+            "running": binance_ws_manager.running,
+            "mode": "LIVE" if binance_ws_manager.is_live else "TESTNET",
+            "url": binance_ws_manager.get_ws_url(),
+            "symbols_count": len(binance_ws_manager.data)
+        },
+        "bybit": {
+            "running": bybit_ws_manager.running,
+            "mode": "LIVE" if bybit_ws_manager.is_live else "TESTNET",
+            "url": bybit_ws_manager.get_ws_url(),
+            "symbols_count": len(bybit_ws_manager.data)
+        }
     }
 
 from pydantic import BaseModel

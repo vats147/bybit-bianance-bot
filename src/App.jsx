@@ -322,44 +322,13 @@ function App() {
   const [isLive, setIsLive] = useState(false); // Default OFF
 
   useEffect(() => {
-    if (!isLive) return; // Don't connect if Live Mode is OFF
-
-    let binanceWS = null;
-    // let bybitWS = null; // Placeholder
-
-    const connectSockets = () => {
-      // ... (existing WS connection logic)
-      // 1. Binance
-      binanceWS = new WebSocket('wss://fstream.binance.com/ws/!markPrice@arr@1s');
-      binanceWS.onopen = () => setConnectionStatus(prev => ({ ...prev, binance: 'connected' }));
-      binanceWS.onclose = () => setConnectionStatus(prev => ({ ...prev, binance: 'disconnected' }));
-      binanceWS.onerror = (err) => { if (binanceWS && binanceWS.readyState !== WebSocket.CLOSED) { } };
-      binanceWS.onmessage = (event) => {
-        try {
-          const msg = JSON.parse(event.data);
-          if (Array.isArray(msg)) {
-            msg.forEach(update => {
-              if (update.s && update.s.endsWith('USDT')) {
-                const symbol = update.s.replace('USDT', '');
-                if (!dataRef.current[symbol]) { dataRef.current[symbol] = { symbol }; }
-                dataRef.current[symbol].binanceRate = parseFloat(update.r);
-                if (update.p) dataRef.current[symbol].markPrice = parseFloat(update.p);
-              }
-            });
-          }
-        } catch (e) { }
-      };
-      // 2. Bybit - No Public WebSocket known yet
-      // Placeholder for future implementation
-    };
-
-    connectSockets();
-
+    // We now rely on Backend WebSocket (starting/stopping via manageWS)
+    // for both Binance and Bybit to ensure stability and alerts.
+    // Direct frontend WS is disabled to save browser resources.
     return () => {
-      if (binanceWS) { binanceWS.close(); }
       setConnectionStatus({ binance: 'disconnected', coinswitch: 'disconnected' });
     };
-  }, [isLive]); // Re-run when toggle changes
+  }, [isLive]);
 
 
 
@@ -371,42 +340,38 @@ function App() {
     // Start/Stop WebSocket based on mode
     const manageWS = async () => {
       try {
-        if (isLive) {
-          // LIVE mode - use WebSocket
-          await fetch(`${primary}/api/ws/start?is_live=true`, { method: "POST" });
+        const fetchMode = isLive ? "true" : "false";
+        await fetch(`${primary}/api/ws/start?is_live=${fetchMode}`, { method: "POST" });
 
-          // Wait a moment for WS to connect and receive data
-          await new Promise(r => setTimeout(r, 3000));
+        // Polling loop to update connection UI from backend status
+        const updateStatus = async () => {
+          try {
+            const statusRes = await fetch(`${primary}/api/ws/status`);
+            const status = await statusRes.json();
 
-          const statusRes = await fetch(`${primary}/api/ws/status`);
-          const status = await statusRes.json();
+            // New structure: { binance: { running, symbols_count }, bybit: { running, symbols_count } }
+            setConnectionStatus({
+              binance: status.binance?.symbols_count > 0 ? 'connected' : 'disconnected',
+              coinswitch: status.bybit?.symbols_count > 0 ? 'connected' : 'disconnected'
+            });
 
-          if (status.symbols_count > 0) {
-            toast.success(`LIVE Mode: WebSocket active with ${status.symbols_count} symbols`);
-          } else {
-            toast.warning(`LIVE Mode: WebSocket connecting...`);
-          }
-        } else {
-          // TESTNET mode - now uses stream.binancefuture.com which works!
-          await fetch(`${primary}/api/ws/start?is_live=false`, { method: "POST" });
+            if (status.binance?.symbols_count > 0 || status.bybit?.symbols_count > 0) {
+              console.log(`📡 WS Active: BN(${status.binance?.symbols_count}) BB(${status.bybit?.symbols_count})`);
+            }
+          } catch (e) { console.error("Status check failed", e); }
+        };
 
-          await new Promise(r => setTimeout(r, 3000));
+        updateStatus();
+        const statusPoll = setInterval(updateStatus, 10000);
+        return () => clearInterval(statusPoll);
 
-          const statusRes = await fetch(`${primary}/api/ws/status`);
-          const status = await statusRes.json();
-
-          if (status.symbols_count > 0) {
-            toast.success(`TESTNET Mode: WebSocket active with ${status.symbols_count} symbols`);
-          } else {
-            toast.warning(`TESTNET Mode: WebSocket connecting... (Falling back to REST)`);
-          }
-        }
       } catch (e) {
         toast.error(`Mode switch error: ${e.message}`);
       }
     };
 
-    manageWS();
+    const cleanup = manageWS();
+    return () => { if (typeof cleanup === 'function') cleanup(); };
   }, [isLive]);
 
   // Fetch initial snapshot & Polling Backup
