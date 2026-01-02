@@ -3,3 +3,6 @@ uvicorn
 requests
 python-dotenv
 httpx
+pydantic
+cryptography
+websockets

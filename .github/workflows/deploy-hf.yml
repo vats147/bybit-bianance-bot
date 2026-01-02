@@ -1,0 +1,26 @@
+name: Sync to Hugging Face Spaces
+on:
+  push:
+    branches: [main, vatsal-dev]
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+      - name: Deploy to Hugging Face
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          git config --global user.email "bot@github.com"
+          git config --global user.name "GitHub Action Bot"
+          # Clone the HF Space (only the backend goes here)
+          git clone https://vats147:$HF_TOKEN@huggingface.co/spaces/vats147/bianance-bot hf_space
+          # Clean HF space and copy current backend files
+          rm -rf hf_space/*
+          cp -r backend/* hf_space/
+          cd hf_space
+          git add .
+          git commit -m "Sync from GitHub: ${{ github.sha }}" || echo "No changes to commit"
+          git push origin main

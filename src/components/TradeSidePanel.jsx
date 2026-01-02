@@ -46,6 +46,9 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
     const spread = data?.spread || 0;
     const balance = 175.1054; // Mock balance
 
+    // Safety Lock
+    const isTradeLocked = Math.abs(binanceRate) === 0 || Math.abs(bybitRate) === 0;
+
     // Strategy recommendation based on funding rates
     const recommendation = (() => {
         if (binanceRate < bybitRate) {
@@ -118,7 +121,7 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
         const bybitSecret = localStorage.getItem("user_bybit_secret");
         const binanceKey = localStorage.getItem("user_binance_key");
         const binanceSecret = localStorage.getItem("user_binance_secret");
-        const backendUrl = localStorage.getItem("primary_backend_url") || "http://127.0.0.1:8000";
+        const backendUrl = localStorage.getItem("primary_backend_url") || "https://vats147-bianance-bot.hf.space";
 
         try {
             const res = await fetch(`${backendUrl}/api/positions?symbol=${symbol}`, {
@@ -176,7 +179,7 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
         const binanceSecret = localStorage.getItem("user_binance_secret") || "";
         const isTestnet = localStorage.getItem("user_binance_testnet") !== "false";
 
-        const backendUrl = localStorage.getItem("primary_backend_url") || "http://127.0.0.1:8000";
+        const backendUrl = localStorage.getItem("primary_backend_url") || "https://vats147-bianance-bot.hf.space";
 
         // Smart quantity calculation with proper precision based on price
         // Expensive tokens (BTC, ETH) need more decimals, cheap tokens need integers
@@ -483,6 +486,17 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
                         </div>
                     )}
 
+                    {/* Safety Alert */}
+                    {isTradeLocked && (
+                        <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3 flex items-center gap-3">
+                            <AlertTriangle className="w-5 h-5 text-red-500 shrink-0" />
+                            <div className="text-xs text-red-400 font-bold">
+                                TRADE LOCKED: 0.0000% rate detected.
+                                <span className="block font-normal opacity-80 mt-1">Trading is disabled to prevent loss-making positions.</span>
+                            </div>
+                        </div>
+                    )}
+
                     {/* Top Controls: Margin Mode & Leverage */}
                     <div className="flex gap-2">
                         {/* Margin Mode Dropdown */}
@@ -628,19 +642,29 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
                         <div className="space-y-2 pt-2">
                             {/* Execute Both - Main CTA */}
                             <Button
-                                className="w-full h-12 bg-gradient-to-r from-green-600 to-blue-600 hover:from-green-700 hover:to-blue-700 text-white font-bold text-base rounded-md shadow-lg"
+                                className={cn(
+                                    "w-full h-12 text-white font-bold text-base rounded-md shadow-lg",
+                                    isTradeLocked
+                                        ? "bg-gray-700 cursor-not-allowed opacity-50"
+                                        : "bg-gradient-to-r from-green-600 to-blue-600 hover:from-green-700 hover:to-blue-700"
+                                )}
                                 onClick={() => handleExecuteClick("Both", "Both")}
-                                disabled={loading || !amount}
+                                disabled={loading || !amount || isTradeLocked}
                             >
                                 <ArrowRightLeft className="w-5 h-5 mr-2" />
-                                Execute Arbitrage Trade
+                                {isTradeLocked ? "Trade Locked (0% Rate)" : "Execute Arbitrage Trade"}
                             </Button>
 
                             {/* Scheduled Trade Button */}
                             <Button
-                                className="w-full h-10 bg-[#3a3a42] hover:bg-[#4a4a52] text-yellow-500 font-bold text-sm rounded-md border border-yellow-500/20"
+                                className={cn(
+                                    "w-full h-10 font-bold text-sm rounded-md border",
+                                    isTradeLocked
+                                        ? "bg-gray-800 border-gray-700 text-gray-500 cursor-not-allowed"
+                                        : "bg-[#3a3a42] hover:bg-[#4a4a52] text-yellow-500 border-yellow-500/20"
+                                )}
                                 onClick={() => handleExecuteClick("Schedule", "Both")}
-                                disabled={loading || !amount}
+                                disabled={loading || !amount || isTradeLocked}
                             >
                                 <Zap className="w-4 h-4 mr-2" />
                                 Auto Trade (Next Minute)
@@ -649,17 +673,23 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
                             {/* Individual Trades */}
                             <div className="grid grid-cols-2 gap-2">
                                 <Button
-                                    className="h-10 bg-[#2ebd85] hover:bg-[#2ebd85]/90 text-white font-bold text-sm rounded-md"
+                                    className={cn(
+                                        "h-10 text-white font-bold text-sm rounded-md",
+                                        isTradeLocked ? "bg-gray-700 cursor-not-allowed opacity-50" : "bg-[#2ebd85] hover:bg-[#2ebd85]/90"
+                                    )}
                                     onClick={() => handleExecuteClick("Long", recommendation.longPlatform)}
-                                    disabled={loading}
+                                    disabled={loading || isTradeLocked}
                                 >
                                     <TrendingUp className="w-4 h-4 mr-1" />
                                     Long {recommendation.longPlatform}
                                 </Button>
                                 <Button
-                                    className="h-10 bg-[#f6465d] hover:bg-[#f6465d]/90 text-white font-bold text-sm rounded-md"
+                                    className={cn(
+                                        "h-10 text-white font-bold text-sm rounded-md",
+                                        isTradeLocked ? "bg-gray-700 cursor-not-allowed opacity-50" : "bg-[#f6465d] hover:bg-[#f6465d]/90"
+                                    )}
                                     onClick={() => handleExecuteClick("Short", recommendation.shortPlatform)}
-                                    disabled={loading}
+                                    disabled={loading || isTradeLocked}
                                 >
                                     <TrendingDown className="w-4 h-4 mr-1" />
                                     Short {recommendation.shortPlatform}
@@ -728,7 +758,7 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
                                 variant="destructive"
                                 className="w-full font-bold h-9 text-xs animate-pulse bg-red-600 mt-1"
                                 onClick={async () => {
-                                    const backendUrl = localStorage.getItem("primary_backend_url") || "http://127.0.0.1:8000";
+                                    const backendUrl = localStorage.getItem("primary_backend_url") || "https://vats147-bianance-bot.hf.space";
                                     try {
                                         await fetch(`${backendUrl}/api/close-all-positions`, {
                                             method: "POST", headers: {

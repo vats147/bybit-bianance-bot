@@ -17,7 +17,7 @@ import { cn } from "@/lib/utils";
 // --- API Helpers ---
 
 const getBackendUrl = () => {
-  const primary = localStorage.getItem("primary_backend_url") || "http://127.0.0.1:8000";
+  const primary = localStorage.getItem("primary_backend_url") || "https://vats147-bianance-bot.hf.space";
   const backup = localStorage.getItem("backup_backend_url");
   return { primary, backup };
 };
@@ -177,6 +177,14 @@ function App() {
 
   // Load telegram config and auto-trade symbols from localStorage
   useEffect(() => {
+    // Enforcement: Force reset primary backend URL to Hugging Face
+    const targetUrl = "https://vats147-bianance-bot.hf.space";
+    const currentPrimary = localStorage.getItem("primary_backend_url");
+    if (currentPrimary !== targetUrl) {
+      console.log(`Enforcing backend URL: ${currentPrimary} -> ${targetUrl}`);
+      localStorage.setItem("primary_backend_url", targetUrl);
+    }
+
     const savedToken = localStorage.getItem("telegram_token") || '';
     const savedChatId = localStorage.getItem("telegram_chat_id") || '';
     setTelegramConfig({ token: savedToken, chatId: savedChatId });
@@ -216,7 +224,7 @@ function App() {
   const alertedPairsRef = useRef(new Map()); // symbol -> lastFundingTimeAlerted
 
   const getBackendUrl = () => {
-    const primary = localStorage.getItem("primary_backend_url") || "http://127.0.0.1:8000";
+    const primary = localStorage.getItem("primary_backend_url") || "https://vats147-bianance-bot.hf.space";
     const backup = localStorage.getItem("backup_backend_url");
     return { primary, backup };
   };
@@ -269,8 +277,8 @@ function App() {
 
         // Interval Lookup via Ref
         const intervals = intervalMapRef.current[item.symbol] || {};
-        const bybitInt = intervals.bybit || 8;
-        const binanceInt = intervals.binance || 8;
+        const bybitInt = intervals.bybit || null;
+        const binanceInt = intervals.binance || null;
 
         return {
           ...item,
@@ -421,7 +429,9 @@ function App() {
         Object.keys(c).forEach(s => {
           if (!dataRef.current[s]) dataRef.current[s] = { symbol: s };
           dataRef.current[s].bybitRate = c[s].rate;
-          if (c[s].markPrice) dataRef.current[s].markPrice = c[s].markPrice; // Use Bybit price if available? Mostly stick to Binance
+          if (c[s].markPrice && !dataRef.current[s].markPrice) dataRef.current[s].markPrice = c[s].markPrice;
+          if (c[s].nextFundingTime && !dataRef.current[s].nextFundingTime) dataRef.current[s].nextFundingTime = c[s].nextFundingTime;
+          if (c[s].fundingIntervalHours) dataRef.current[s].fundingIntervalHours = c[s].fundingIntervalHours;
         });
 
         // If this was the first load, turn off loading
@@ -693,9 +703,19 @@ function App() {
           </div>
 
           <div className="flex items-center gap-4">
+            {/* Mode Badge */}
+            <div className={cn(
+              "px-3 py-1.5 rounded-lg text-xs font-bold uppercase tracking-widest border shadow-sm",
+              isLive
+                ? "bg-green-500/10 text-green-600 border-green-500/20"
+                : "bg-amber-500/10 text-amber-600 border-amber-500/20"
+            )}>
+              {isLive ? "Mainnet" : "Testnet"}
+            </div>
+
             {/* Live Mode Toggle (moved here) */}
             <div className="flex items-center gap-2 bg-card border px-3 py-1.5 rounded-lg shadow-sm">
-              <span className="text-sm font-medium">Live Mode</span>
+              <span className="text-sm font-medium">Live Toggle</span>
               <Switch checked={isLive} onCheckedChange={setIsLive} />
               <span className={cn("inline-block w-2 h-2 rounded-full animate-pulse", isLive ? "bg-green-500" : "bg-gray-400")}></span>
             </div>
@@ -894,9 +914,9 @@ function App() {
 
                               return (
                                 <div className="flex flex-col">
-                                  <span className="text-xs">{h}h {m}m</span>
-                                  <span className="text-[10px] text-muted-foreground font-semibold">
-                                    Bin: {item.intervals?.binance}h / Byb: {item.intervals?.bybit}h
+                                  <span className="text-xs font-mono">{h}h {m}m</span>
+                                  <span className="text-[9px] text-muted-foreground font-semibold uppercase leading-tight">
+                                    Bn: {item.intervals?.binance || '?'}h | Bb: {item.intervals?.bybit || '?'}h
                                   </span>
                                 </div>
                               );
@@ -916,11 +936,21 @@ function App() {
                           </TableCell>
                           <TableCell className="text-right sticky right-0 z-10 bg-background shadow-[-1px_0_5px_rgba(0,0,0,0.05)] border-l">
                             <div className="flex justify-end gap-1">
-                              <Tooltip content="Open Trade Panel" side="top">
+                              <Tooltip content={
+                                (Math.abs(item.binanceRate) === 0 || Math.abs(item.bybitRate) === 0)
+                                  ? "Trade Locked: 0% Rate detected"
+                                  : "Open Trade Panel"
+                              } side="top">
                                 <Button
                                   size="sm"
-                                  className="h-8 bg-blue-600 hover:bg-blue-700 text-white font-bold px-2 sm:px-3 shadow-sm border border-blue-500/50"
+                                  className={cn(
+                                    "h-8 font-bold px-2 sm:px-3 shadow-sm border",
+                                    (Math.abs(item.binanceRate) === 0 || Math.abs(item.bybitRate) === 0)
+                                      ? "bg-gray-500/20 text-gray-500 border-gray-500/30 cursor-not-allowed"
+                                      : "bg-blue-600 hover:bg-blue-700 text-white border-blue-500/50"
+                                  )}
                                   onClick={() => setSelectedOpportunity(item)}
+                                  disabled={Math.abs(item.binanceRate) === 0 || Math.abs(item.bybitRate) === 0}
                                 >
                                   Trade
                                 </Button>
