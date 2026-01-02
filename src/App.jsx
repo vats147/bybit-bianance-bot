@@ -177,10 +177,12 @@ function App() {
 
   // Load telegram config and auto-trade symbols from localStorage
   useEffect(() => {
-    // Enforcement: Force reset primary backend URL to Hugging Face
+    // Enforcement: Force reset primary backend URL to Hugging Face (ONLY in production)
     const targetUrl = "https://vats147-bianance-bot.hf.space";
     const currentPrimary = localStorage.getItem("primary_backend_url");
-    if (currentPrimary !== targetUrl) {
+    const isLocal = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
+
+    if (!isLocal && currentPrimary !== targetUrl) {
       console.log(`Enforcing backend URL: ${currentPrimary} -> ${targetUrl}`);
       localStorage.setItem("primary_backend_url", targetUrl);
     }

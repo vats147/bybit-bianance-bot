@@ -15,12 +15,25 @@ jobs:
         run: |
           git config --global user.email "bot@github.com"
           git config --global user.name "GitHub Action Bot"
-          # Clone the HF Space (only the backend goes here)
+          
+          # Clone the HF Space using token in URL for authentication
           git clone https://vats147:$HF_TOKEN@huggingface.co/spaces/vats147/bianance-bot hf_space
-          # Clean HF space and copy current backend files
-          rm -rf hf_space/*
-          cp -r backend/* hf_space/
+          
+          # Clean HF space (except .git)
+          find hf_space -maxdepth 1 -not -name 'hf_space' -not -name '.git' -exec rm -rf {} +
+          
+          # Copy backend files, ensuring we don't copy local .git or __pycache__
+          rsync -av --exclude '.git' --exclude '__pycache__' --exclude '.env' backend/ hf_space/
+          
           cd hf_space
+          
+          # Add a simple .gitignore to the Space if it doesn't exist
+          if [ ! -f .gitignore ]; then
+            echo "__pycache__/" > .gitignore
+            echo "*.pyc" >> .gitignore
+            echo ".env" >> .gitignore
+          fi
+          
           git add .
           git commit -m "Sync from GitHub: ${{ github.sha }}" || echo "No changes to commit"
           git push origin main
