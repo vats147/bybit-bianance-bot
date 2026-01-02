@@ -107,6 +107,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.get("/")
+async def root():
+    return {"status": "success", "message": "Binance Bot API is running on Hugging Face Spaces!"}
+
 # Configuration
 BINANCE_API = "https://fapi.binance.com/fapi/v1/premiumIndex"
 # Using the working endpoint found in testing
@@ -1201,5 +1205,8 @@ async def get_positions(
 
 if __name__ == "__main__":
     import uvicorn
-    # Listen on all interfaces with Hot Reload enabled
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    import os
+    # Hugging Face Spaces uses port 7860 by default
+    port = int(os.getenv("PORT", 8000))
+    # Listen on all interfaces
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)

@@ -7,7 +7,7 @@ import { Save, Server, Shield, Send } from "lucide-react";
 
 export function SettingsPage() {
     const [config, setConfig] = useState({
-        primaryBackendUrl: "https://a0ecbd4102e9.ngrok-free.app",
+        primaryBackendUrl: "https://vats147-bianance-bot.hf.space",
         backupBackendUrl: "",
         apiKey: "", // Bybit
         apiSecret: "", // Bybit
