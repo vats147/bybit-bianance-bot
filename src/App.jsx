@@ -22,9 +22,9 @@ const getBackendUrl = () => {
   return { primary, backup };
 };
 
-const fetchRatesWithFailover = async () => {
+const fetchRatesWithFailover = async (isLive) => {
   const { primary, backup } = getBackendUrl();
-  const endpoint = "/api/rates";
+  const endpoint = `/api/rates?is_live=${isLive ? 'true' : 'false'}`;
 
   try {
     const res = await fetch(`${primary}${endpoint}`);
@@ -38,10 +38,10 @@ const fetchRatesWithFailover = async () => {
         return await resBackup.json();
       } catch (backupError) {
         console.error("Backup API also failed.");
-        return { binance: {}, coinswitch: {} }; // Return empty structure on total failure
+        return { binance: {}, bybit: {} };
       }
     }
-    return { binance: {}, coinswitch: {} };
+    return { binance: {}, bybit: {} };
   }
 };
 
@@ -277,10 +277,10 @@ function App() {
           apr = spread * 3 * 365;
         }
 
-        // Interval Lookup via Ref
+        // Interval Lookup via Ref (fallback)
         const intervals = intervalMapRef.current[item.symbol] || {};
-        const bybitInt = intervals.bybit || null;
-        const binanceInt = intervals.binance || null;
+        const bybitInt = item.fundingIntervalHours || intervals.bybit || null;
+        const binanceInt = intervals.binance || null; // Binance currently only in metadata
 
         return {
           ...item,
@@ -395,10 +395,28 @@ function App() {
         });
         Object.keys(c).forEach(s => {
           if (!dataRef.current[s]) dataRef.current[s] = { symbol: s };
+
+          // Store both rates
           dataRef.current[s].bybitRate = c[s].rate;
-          if (c[s].markPrice && !dataRef.current[s].markPrice) dataRef.current[s].markPrice = c[s].markPrice;
-          if (c[s].nextFundingTime && !dataRef.current[s].nextFundingTime) dataRef.current[s].nextFundingTime = c[s].nextFundingTime;
-          if (c[s].fundingIntervalHours) dataRef.current[s].fundingIntervalHours = c[s].fundingIntervalHours;
+
+          // If Binance didn't have a markprice but bybit does, use it
+          if (c[s].markPrice && !dataRef.current[s].markPrice) {
+            dataRef.current[s].markPrice = c[s].markPrice;
+          }
+
+          // Prefer Bybit funding time if Binance is missing or Bybit is more recent (earlier)
+          const bnNFT = dataRef.current[s].nextFundingTime || Infinity;
+          const bbNFT = c[s].nextFundingTime || Infinity;
+
+          if (bbNFT < bnNFT && bbNFT !== Infinity) {
+            dataRef.current[s].nextFundingTime = bbNFT;
+          } else if (bnNFT !== Infinity) {
+            dataRef.current[s].nextFundingTime = bnNFT;
+          }
+
+          if (c[s].fundingIntervalHours) {
+            dataRef.current[s].fundingIntervalHours = c[s].fundingIntervalHours;
+          }
         });
 
         // If this was the first load, turn off loading
@@ -417,7 +435,7 @@ function App() {
           Object.keys(dataRef.current).forEach(symbol => {
             const item = dataRef.current[symbol];
             if (item.binanceRate !== undefined && item.bybitRate !== undefined && item.nextFundingTime) {
-              const diff = Math.abs(item.binanceRate - item.bybitRate) * 100;
+              const diff = Math.abs(item.binanceRate - item.bybitRate); // Both are already in % (e.g. 0.01)
               const timeToFunding = item.nextFundingTime - Date.now();
 
               if (diff >= threshold && timeToFunding > 0 && timeToFunding <= leadTimeMs) {
@@ -433,7 +451,7 @@ function App() {
                       token: tgToken,
                       chatId: tgChatId,
                       message: `🚨 *High Funding Alert: ${symbol}*\n\n` +
-                        `*Difference:* ${diff.toFixed(3)}%\n` +
+                        `*Difference:* ${diff.toFixed(4)}%\n` +
                         `*Binance:* ${item.binanceRate.toFixed(4)}%\n` +
                         `*Bybit:* ${item.bybitRate.toFixed(4)}%\n` +
                         `*Time to Funding:* ${Math.floor(timeToFunding / 60000)}m ${Math.floor((timeToFunding % 60000) / 1000)}s`,

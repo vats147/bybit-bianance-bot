@@ -291,13 +291,34 @@ class BybitWebSocketManager:
                     self.ws = ws
                     print(f"✅ Bybit WS Connected ({'LIVE' if self.is_live else 'TESTNET'})")
                     
-                    # Subscribe to tickers for all USDT pairs
-                    # Bybit requires subscription
+                    # Bybit V5 Linear Tickers subscription topic is tickers.{symbol}
+                    # We can also use 'tickers.USDT' for SOME environments but it's not universal.
+                    # Best is to fetch symbols or use the shorthand if verified.
+                    # Given the ambiguity, we'll try 'tickers.USDT' first as it works in some Pro/Unified accounts,
+                    # but we'll also handle the individual symbol data correctly.
                     subscribe_msg = {
                         "op": "subscribe",
-                        "args": ["tickers.USDT"] # Linear tickers
+                        "args": ["tickers.BTCUSDT", "tickers.ETHUSDT", "tickers.SOLUSDT", "tickers.BNBUSDT"] # Priority ones
                     }
-                    await ws.send(json.dumps(subscribe_msg))
+                    # Add remaining symbols if we had a list, but for now let's try a broader one first
+                    # Search suggests "tickers.USDT" might not be an official "all" but is a common pattern for some categories.
+                    # Let's try to subscribe dynamically by fetching symbols once.
+                    
+                    try:
+                        resp = requests.get(BYBIT_API_URL if self.is_live else BYBIT_API_TESTNET_URL, params={"category": "linear"})
+                        if resp.status_code == 200:
+                            s_data = resp.json()
+                            if s_data.get("retCode") == 0:
+                                symbols = [f"tickers.{item['symbol']}" for item in s_data["result"]["list"] if item["symbol"].endswith("USDT")]
+                                # Bybit has a limit per subscription message (usually 10-20), but we can send multiple or 
+                                # try a bulk one if supported. Let's send in chunks of 10.
+                                chunk_size = 10
+                                for i in range(0, min(len(symbols), 500), chunk_size): # Limit to 500 to avoid overloading
+                                    chunk = symbols[i : i + chunk_size]
+                                    await ws.send(json.dumps({"op": "subscribe", "args": chunk}))
+                    except Exception as e:
+                        print(f"Bybit WS Subscription error: {e}")
+                        await ws.send(json.dumps({"op": "subscribe", "args": ["tickers.BTCUSDT"]}))
                     
                     async for message in ws:
                         if not self.running:
@@ -307,8 +328,9 @@ class BybitWebSocketManager:
                             if "topic" in msg_data and msg_data["topic"].startswith("tickers"):
                                 data = msg_data.get("data", {})
                                 symbol = data.get("symbol", "")
-                                if symbol.endswith("USDT"):
-                                    norm_symbol = symbol.replace("USDT", "")
+                                if symbol.endswith("USDT") or symbol.endswith("PERP"):
+                                    # Normalize symbol
+                                    norm_symbol = symbol.replace("USDT", "").replace("PERP", "")
                                     
                                     # Update if data is present (Bybit sends delta updates)
                                     if norm_symbol not in self.data:
@@ -319,9 +341,10 @@ class BybitWebSocketManager:
                                     if "markPrice" in data:
                                         self.data[norm_symbol]["markPrice"] = float(data["markPrice"])
                                     if "nextFundingTime" in data:
+                                        # Bybit sends nft as milliseconds
                                         self.data[norm_symbol]["nextFundingTime"] = int(data["nextFundingTime"])
                                     
-                                    # Default interval if not in ticker (often not in tickers)
+                                    # Default interval
                                     if "fundingIntervalHours" not in self.data[norm_symbol]:
                                          self.data[norm_symbol]["fundingIntervalHours"] = 8
                                          
@@ -408,20 +431,25 @@ async def fetch_bybit_rates(is_live: bool = False):
             if data['retCode'] == 0:
                 rates = {}
                 for item in data['result']['list']:
-                    if item['symbol'].endswith('USDT'):
-                        # Remove USDT suffix
-                        symbol = item['symbol'][:-4] 
+                    symbol_raw = item['symbol']
+                    if symbol_raw.endswith('USDT') or symbol_raw.endswith('PERP'):
+                        # Normalize symbol
+                        symbol = symbol_raw.replace("USDT", "").replace("PERP", "")
                         
                         fr = item.get('fundingRate', '0')
                         mp = item.get('markPrice', '0')
                         nft = item.get('nextFundingTime', '0')
-                        fih = item.get('fundingIntervalHour', '8')
+                        # Bybit V5 uses 'fundingIntervalHour' (missing 's' sometimes) or 'fundingInterval'
+                        fih = item.get('fundingIntervalHour') or item.get('fundingInterval', '480')
+                        
+                        # Convert minutes to hours if it's 480
+                        interval_hours = int(fih) if int(fih) < 24 else int(fih) // 60
                         
                         rates[symbol] = {
                             "rate": float(fr) if fr else 0.0,
                             "markPrice": float(mp) if mp else 0.0,
-                            "nextFundingTime": int(nft) if nft else 0,
-                            "fundingIntervalHours": int(fih) if fih else 8
+                            "nextFundingTime": int(nft) if nft and nft != '0' else 0,
+                            "fundingIntervalHours": interval_hours
                         }
                 return rates
             else:
