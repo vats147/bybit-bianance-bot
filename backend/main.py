@@ -647,20 +647,76 @@ class TradeScheduler:
                 self.tasks[task_id]['status'] = f"WAITING_ENTRY (Starts in {int(delay_entry)}s)"
                 await asyncio.sleep(delay_entry)
             
+            # --- CHECK PROFITABILITY & DECIDE DIRECTION (If Auto/Both) ---
+            if params.get('platform') == "Both":
+                # Fetch fresh rates
+                print("Fetching live rates for decision...")
+                rates_data = await get_rates() 
+                binance_r = 0
+                bybit_r = 0
+                
+                # Extract Rates
+                sym = params['symbol']
+                if sym in rates_data['binance']: binance_r = rates_data['binance'][sym]['rate']
+                if sym in rates_data['bybit']: bybit_r = rates_data['bybit'][sym]['rate']
+                
+                print(f"Rates Check - Binance: {binance_r*100}%, Bybit: {bybit_r*100}%")
+                
+                # Logic: Short Higher Rate, Long Lower Rate
+                # If Bybit > Binance: Short Bybit, Long Binance
+                # If Binance > Bybit: Short Binance, Long Bybit
+                
+                if bybit_r > binance_r:
+                    # Short Bybit, Long Binance
+                    params['bybit_side'] = "Sell"
+                    params['binance_side'] = "Buy"
+                else:
+                    # Short Binance, Long Bybit
+                    params['bybit_side'] = "Buy"
+                    params['binance_side'] = "Sell"
+                    
+                self.tasks[task_id]['details'] = f"Decision: Long {params['binance_side']=='Buy' and 'Binance' or 'Bybit'}, Short {params['binance_side']=='Sell' and 'Binance' or 'Bybit'}"
+            else:
+                # Single Platform
+                params['bybit_side'] = params['direction'] if params['platform'] == "Bybit" else None
+                params['binance_side'] = params['direction'] if params['platform'] == "Binance" else None
+
             # --- EXECUTE ENTRY ---
             self.tasks[task_id]['status'] = "EXECUTING_ENTRY"
             
-            entry_side = params['direction']
-            await self._internal_place_order(params['symbol'], entry_side, params['qty'], params['leverage'], params['platform'], params)
+            # Execute concurrently? Or sequential? Sequential is safer for nonce but slower.
+            # Arbitrage needs simultaneous.
             
-            # 2. Wait for Exit (Target + 10s) -> 30s duration from entry
-            # Total wait from Entry point is ~30s (20s pre + 10s post)
-            await asyncio.sleep(30)
+            tasks = []
+            if params['platform'] == "Bybit" or params['platform'] == "Both":
+                 side = params['bybit_side']
+                 tasks.append(self._internal_place_order(params['symbol'], side, params['qty'], params['leverage'], "BYBIT", params))
+            
+            if params['platform'] == "Binance" or params['platform'] == "Both":
+                 side = params['binance_side']
+                 tasks.append(self._internal_place_order(params['symbol'], side, params['qty'], params['leverage'], "BINANCE", params))
+            
+            await asyncio.gather(*tasks)
+            
+            # 2. Wait for Exit (Target + Duration) 
+            # Default to 30s if not specified
+            trade_duration = params.get('duration', 30)
+            print(f"Waiting for {trade_duration}s before exit...")
+            await asyncio.sleep(trade_duration)
             
             # --- EXECUTE EXIT ---
             self.tasks[task_id]['status'] = "EXECUTING_EXIT"
-            exit_side = "Sell" if entry_side == "Buy" else "Buy"
-            await self._internal_place_order(params['symbol'], exit_side, params['qty'], params['leverage'], params['platform'], params)
+            
+            exit_tasks = []
+            if params['platform'] == "Bybit" or params['platform'] == "Both":
+                 side = "Sell" if params['bybit_side'] == "Buy" else "Buy"
+                 exit_tasks.append(self._internal_place_order(params['symbol'], side, params['qty'], params['leverage'], "BYBIT", params))
+            
+            if params['platform'] == "Binance" or params['platform'] == "Both":
+                 side = "Sell" if params['binance_side'] == "Buy" else "Buy"
+                 exit_tasks.append(self._internal_place_order(params['symbol'], side, params['qty'], params['leverage'], "BINANCE", params))
+
+            await asyncio.gather(*exit_tasks)
             
             # 3. PROFIT CALCULATION ( Simulated / Estimated )
             # Profit ~ (Position Value * Funding Rate) - Fees
@@ -742,6 +798,7 @@ async def schedule_trade(
     if x_user_binance_key: params['binance_key'] = x_user_binance_key
     if x_user_binance_secret: params['binance_secret'] = x_user_binance_secret
 
+    # If direction is "Auto" or implied by "Both", we defer decision to execution time
     scheduler.tasks[task_id] = {
         "status": "QUEUED",
         "params": params,
@@ -760,6 +817,183 @@ async def get_scheduled_tasks():
         "tasks": scheduler.tasks,
         "profit_log": scheduler.profit_log
     }
+
+@app.post("/api/close-all-positions")
+async def close_all_positions(
+    x_user_bybit_key: Optional[str] = Header(None),
+    x_user_bybit_secret: Optional[str] = Header(None),
+    x_user_binance_key: Optional[str] = Header(None),
+    x_user_binance_secret: Optional[str] = Header(None)
+):
+    results = {"bybit": [], "binance": []}
+    
+    # --- CLOSE BYBIT POSITIONS ---
+    try:
+        if x_user_bybit_key and x_user_bybit_secret:
+            api_key, api_secret = get_api_credentials(x_user_bybit_key, x_user_bybit_secret)
+            
+            # 1. Fetch Positions
+            endpoint = "/v5/position/list"
+            url = BYBIT_DEMO_URL + endpoint
+            params = "category=linear&settleCoin=USDT"
+            timestamp, recv_window, signature = generate_signature(api_key, api_secret, params)
+            
+            headers = {
+                "X-BAPI-API-KEY": api_key,
+                "X-BAPI-SIGN": signature,
+                "X-BAPI-TIMESTAMP": timestamp,
+                "X-BAPI-RECV-WINDOW": recv_window
+            }
+            
+            loop = asyncio.get_event_loop()
+            res = await loop.run_in_executor(None, lambda: requests.get(f"{url}?{params}", headers=headers))
+            data = res.json()
+            
+            if data['retCode'] == 0:
+                positions = data['result']['list']
+                for pos in positions:
+                    size = float(pos['size'])
+                    if size > 0:
+                        symbol = pos['symbol'][:-4] if pos['symbol'].endswith('USDT') else pos['symbol'] # Clean symbol
+                        side = pos['side'] # "Buy" or "Sell"
+                        close_side = "Sell" if side == "Buy" else "Buy"
+                        
+                        print(f"Closing Bybit {symbol} {side} ({size})")
+                        
+                        # Close using execute_bybit_logic
+                        try:
+                            # Use reduceOnly order or simply opposite side market order
+                            # We'll use our existing wrapper which does standard Market Order
+                            # Note: execute_bybit_logic expects stripped symbol? No, it appends USDT.
+                            # So we pass "BTC" not "BTCUSDT".
+                            await execute_bybit_logic(api_key, api_secret, symbol, close_side, size, 10) # Leverage doesn't matter much for closing if market
+                            results['bybit'].append(f"Closed {symbol} {side} {size}")
+                        except Exception as e:
+                            results['bybit'].append(f"Failed {symbol}: {str(e)}")
+            else:
+                 results['bybit'].append(f"Error fetching: {data['retMsg']}")
+    except Exception as e:
+        results['bybit'].append(f"Error: {str(e)}")
+
+    # --- CLOSE BINANCE POSITIONS ---
+    try:
+        if x_user_binance_key and x_user_binance_secret:
+            api_key, api_secret = get_binance_credentials(x_user_binance_key, x_user_binance_secret)
+            is_testnet = True # Assumption for now, or check balance/env
+            base_url = "https://testnet.binancefuture.com" if is_testnet else "https://fapi.binance.com"
+            
+            # 1. Fetch Positions
+            endpoint = "/fapi/v2/positionRisk"
+            timestamp = int(time.time() * 1000)
+            q_params = {"timestamp": timestamp}
+            query_string = urlencode(q_params)
+            signature = hmac.new(api_secret.encode('utf-8'), query_string.encode('utf-8'), hashlib.sha256).hexdigest()
+            
+            headers = { "X-MBX-APIKEY": api_key }
+            loop = asyncio.get_event_loop()
+            res = await loop.run_in_executor(None, lambda: requests.get(f"{base_url}{endpoint}?{query_string}&signature={signature}", headers=headers))
+            
+            if res.status_code == 200:
+                data = res.json()
+                for pos in data:
+                    amt = float(pos['positionAmt'])
+                    if amt != 0:
+                        symbol = pos['symbol'].replace("USDT", "")
+                        side = "LONG" if amt > 0 else "SHORT"
+                        close_side = "SELL" if amt > 0 else "BUY"
+                        qty = abs(amt)
+                        
+                        print(f"Closing Binance {symbol} {side} ({qty})")
+                        
+                        try:
+                            await execute_binance_logic(api_key, api_secret, symbol, close_side, qty, 10, is_testnet)
+                            results['binance'].append(f"Closed {symbol} {side} {qty}")
+                        except Exception as e:
+                            results['binance'].append(f"Failed {symbol}: {str(e)}")
+            else:
+                results['binance'].append(f"Error fetching: {res.text}")
+    except Exception as e:
+        results['binance'].append(f"Error: {str(e)}")
+
+    return results
+
+@app.get("/api/positions")
+async def get_positions(
+    symbol: str, 
+    x_user_bybit_key: Optional[str] = Header(None),
+    x_user_bybit_secret: Optional[str] = Header(None),
+    x_user_binance_key: Optional[str] = Header(None),
+    x_user_binance_secret: Optional[str] = Header(None)
+):
+    positions = {"bybit": None, "binance": None}
+    
+    # --- BYBIT POSITIONS ---
+    try:
+        if x_user_bybit_key and x_user_bybit_secret:
+            api_key, api_secret = get_api_credentials(x_user_bybit_key, x_user_bybit_secret)
+            endpoint = "/v5/position/list"
+            url = BYBIT_DEMO_URL + endpoint
+            params = f"category=linear&symbol={symbol}USDT"
+            timestamp, recv_window, signature = generate_signature(api_key, api_secret, params)
+            
+            headers = {
+                "X-BAPI-API-KEY": api_key,
+                "X-BAPI-SIGN": signature,
+                "X-BAPI-TIMESTAMP": timestamp,
+                "X-BAPI-RECV-WINDOW": recv_window
+            }
+            
+            loop = asyncio.get_event_loop()
+            res = await loop.run_in_executor(None, lambda: requests.get(f"{url}?{params}", headers=headers))
+            data = res.json()
+            
+            if data['retCode'] == 0:
+                # Bybit returns a list, usually 2 items (Buy/Sell side) or 1 depending on mode
+                # We want the one with size > 0
+                for pos in data['result']['list']:
+                    if float(pos['size']) > 0:
+                        positions['bybit'] = {
+                            "side": pos['side'],
+                            "size": float(pos['size']),
+                            "entryPrice": float(pos['avgPrice']),
+                            "pnl": float(pos['unrealisedPnl'])
+                        }
+    except Exception as e:
+        print(f"Bybit Pos Error: {e}")
+
+    # --- BINANCE POSITIONS ---
+    try:
+        if x_user_binance_key and x_user_binance_secret:
+            api_key, api_secret = get_binance_credentials(x_user_binance_key, x_user_binance_secret)
+            is_testnet = True 
+            base_url = "https://testnet.binancefuture.com" if is_testnet else "https://fapi.binance.com"
+            
+            endpoint = "/fapi/v2/positionRisk"
+            timestamp = int(time.time() * 1000)
+            q_params = {"timestamp": timestamp, "symbol": f"{symbol}USDT"}
+            query_string = urlencode(q_params)
+            signature = hmac.new(api_secret.encode('utf-8'), query_string.encode('utf-8'), hashlib.sha256).hexdigest()
+            
+            headers = { "X-MBX-APIKEY": api_key }
+            loop = asyncio.get_event_loop()
+            res = await loop.run_in_executor(None, lambda: requests.get(f"{base_url}{endpoint}?{query_string}&signature={signature}", headers=headers))
+            
+            if res.status_code == 200:
+                data = res.json()
+                # Binance returns list (one per symbol usually in this endpoint filter, or checks directions)
+                for pos in data:
+                    amt = float(pos['positionAmt'])
+                    if amt != 0:
+                        positions['binance'] = {
+                            "side": "Buy" if amt > 0 else "Sell",
+                            "size": abs(amt),
+                            "entryPrice": float(pos['entryPrice']),
+                            "pnl": float(pos['unRealizedProfit'])
+                        }
+    except Exception as e:
+        print(f"Binance Pos Error: {e}")
+
+    return positions
 
 if __name__ == "__main__":
     import uvicorn
