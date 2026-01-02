@@ -15,7 +15,9 @@ export function SettingsPage() {
         binanceSecret: "",
         binanceTestnet: true,
         telegramToken: "",
-        telegramChatId: ""
+        telegramChatId: "",
+        alertThreshold: "0.5",
+        alertLeadTime: "10"
     });
 
     useEffect(() => {
@@ -30,6 +32,8 @@ export function SettingsPage() {
         const savedBinanceTestnet = localStorage.getItem("user_binance_testnet");
         const savedTelegramToken = localStorage.getItem("telegram_token");
         const savedTelegramChatId = localStorage.getItem("telegram_chat_id");
+        const savedAlertThreshold = localStorage.getItem("alert_threshold");
+        const savedAlertLeadTime = localStorage.getItem("alert_lead_time");
 
         setConfig({
             primaryBackendUrl: savedPrimary || "https://a0ecbd4102e9.ngrok-free.app",
@@ -40,7 +44,9 @@ export function SettingsPage() {
             binanceSecret: savedBinanceSecret || "",
             binanceTestnet: savedBinanceTestnet === "false" ? false : true,
             telegramToken: savedTelegramToken || "",
-            telegramChatId: savedTelegramChatId || ""
+            telegramChatId: savedTelegramChatId || "",
+            alertThreshold: savedAlertThreshold || "0.5",
+            alertLeadTime: savedAlertLeadTime || "10"
         });
     }, []);
 
@@ -63,6 +69,8 @@ export function SettingsPage() {
         localStorage.setItem("user_binance_testnet", config.binanceTestnet);
         localStorage.setItem("telegram_token", config.telegramToken);
         localStorage.setItem("telegram_chat_id", config.telegramChatId);
+        localStorage.setItem("alert_threshold", config.alertThreshold);
+        localStorage.setItem("alert_lead_time", config.alertLeadTime);
 
         alert("Configuration Saved!");
         window.location.reload();
@@ -194,28 +202,69 @@ export function SettingsPage() {
                         <CardDescription>Configure Telegram bot for real-time alerts.</CardDescription>
                     </CardHeader>
                     <CardContent className="space-y-4">
-                        <div className="grid gap-4 md:grid-cols-2">
+                        <div className="grid gap-4 md:grid-cols-2 mt-4">
                             <div className="space-y-2">
-                                <label className="text-sm font-medium">Bot Token</label>
+                                <label className="text-sm font-medium">Alert Threshold (Diff %)</label>
                                 <Input
-                                    name="telegramToken"
-                                    value={config.telegramToken}
+                                    name="alertThreshold"
+                                    type="number"
+                                    step="0.1"
+                                    value={config.alertThreshold}
                                     onChange={handleChange}
-                                    placeholder="123456789:ABCdefGHIjklMNO..."
+                                    placeholder="0.5"
                                 />
                             </div>
                             <div className="space-y-2">
-                                <label className="text-sm font-medium">Chat ID</label>
+                                <label className="text-sm font-medium">Lead Time (Minutes before Funding)</label>
                                 <Input
-                                    name="telegramChatId"
-                                    value={config.telegramChatId}
+                                    name="alertLeadTime"
+                                    type="number"
+                                    value={config.alertLeadTime}
                                     onChange={handleChange}
-                                    placeholder="-1001234567890"
+                                    placeholder="10"
                                 />
                             </div>
                         </div>
-                        <p className="text-xs text-muted-foreground">
+
+                        <div className="pt-2">
+                            <Button
+                                variant="outline"
+                                className="w-full border-blue-500 text-blue-500 hover:bg-blue-500/10"
+                                onClick={async () => {
+                                    if (!config.telegramToken || !config.telegramChatId) {
+                                        alert("Please enter Bot Token and Chat ID first!");
+                                        return;
+                                    }
+                                    try {
+                                        const res = await fetch(`${config.primaryBackendUrl}/api/telegram/send`, {
+                                            method: "POST",
+                                            headers: { "Content-Type": "application/json" },
+                                            body: JSON.stringify({
+                                                token: config.telegramToken,
+                                                chatId: config.telegramChatId,
+                                                message: "🔔 *Funding Arbitrage Test Alert*\n\nThis is a test notification from your bot. Your configuration is correct! ✅",
+                                                buttonText: "Open Dashboard",
+                                                buttonUrl: window.location.origin
+                                            })
+                                        });
+                                        const data = await res.json();
+                                        if (data.status === "success") {
+                                            alert("Test alert sent successfully!");
+                                        } else {
+                                            alert("Failed to send test alert: " + data.message);
+                                        }
+                                    } catch (e) {
+                                        alert("Error sending test alert: " + e.message);
+                                    }
+                                }}
+                            >
+                                <Send className="mr-2 h-4 w-4" /> Send Test Alert
+                            </Button>
+                        </div>
+
+                        <p className="text-xs text-muted-foreground mt-2">
                             Create a bot via @BotFather and get your chat ID from @userinfobot.
+                            Alerts will be sent when funding difference exceeds {config.alertThreshold}% within {config.alertLeadTime} mins of funding.
                         </p>
                     </CardContent>
                 </Card>

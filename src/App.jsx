@@ -11,6 +11,7 @@ import { Switch } from "@/components/ui/switch";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { ArrowUpDown, ExternalLink, RefreshCw, Settings, AlertTriangle, LayoutDashboard, Activity, Zap } from "lucide-react";
 import { Tooltip } from "@/components/ui/tooltip";
+import { useToast } from "@/components/ui/toast";
 import { cn } from "@/lib/utils";
 
 // --- API Helpers ---
@@ -153,6 +154,7 @@ const fetchCoinSwitchRates = async () => {
 // --- Main Component ---
 
 function App() {
+  const toast = useToast();
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(true);
   const [lastUpdated, setLastUpdated] = useState(null);
@@ -211,6 +213,7 @@ function App() {
   // detailed map to keep store of latest data
   // symbol -> { binanceRate, bybitRate, ... }
   const dataRef = useRef({});
+  const alertedPairsRef = useRef(new Map()); // symbol -> lastFundingTimeAlerted
 
   const getBackendUrl = () => {
     const primary = localStorage.getItem("primary_backend_url") || "http://127.0.0.1:8000";
@@ -352,13 +355,59 @@ function App() {
 
 
 
+  // Toast on Live Mode Change & Trigger WebSocket
+  useEffect(() => {
+    const mode = isLive ? "LIVE" : "TESTNET";
+    const { primary } = getBackendUrl();
+
+    // Start/Stop WebSocket based on mode
+    const manageWS = async () => {
+      try {
+        if (isLive) {
+          // LIVE mode - use WebSocket
+          await fetch(`${primary}/api/ws/start?is_live=true`, { method: "POST" });
+
+          // Wait a moment for WS to connect and receive data
+          await new Promise(r => setTimeout(r, 3000));
+
+          const statusRes = await fetch(`${primary}/api/ws/status`);
+          const status = await statusRes.json();
+
+          if (status.symbols_count > 0) {
+            toast.success(`LIVE Mode: WebSocket active with ${status.symbols_count} symbols`);
+          } else {
+            toast.warning(`LIVE Mode: WebSocket connecting...`);
+          }
+        } else {
+          // TESTNET mode - now uses stream.binancefuture.com which works!
+          await fetch(`${primary}/api/ws/start?is_live=false`, { method: "POST" });
+
+          await new Promise(r => setTimeout(r, 3000));
+
+          const statusRes = await fetch(`${primary}/api/ws/status`);
+          const status = await statusRes.json();
+
+          if (status.symbols_count > 0) {
+            toast.success(`TESTNET Mode: WebSocket active with ${status.symbols_count} symbols`);
+          } else {
+            toast.warning(`TESTNET Mode: WebSocket connecting... (Falling back to REST)`);
+          }
+        }
+      } catch (e) {
+        toast.error(`Mode switch error: ${e.message}`);
+      }
+    };
+
+    manageWS();
+  }, [isLive]);
+
   // Fetch initial snapshot & Polling Backup
   useEffect(() => {
     const fetchData = async () => {
       // Don't show global loading spinner on background refreshes
       // setLoading(true); 
       try {
-        const { binance, bybit } = await fetchRatesWithFailover();
+        const { binance, bybit } = await fetchRatesWithFailover(isLive);
 
         const b = binance || {};
         const c = bybit || {};
@@ -379,6 +428,47 @@ function App() {
         setLoading(false);
         // Trigger table update immediately after fetch
         updateTableData();
+
+        // --- TELEGRAM ALERT MONITORING ---
+        const threshold = parseFloat(localStorage.getItem("alert_threshold") || "0.5");
+        const leadTimeMs = parseInt(localStorage.getItem("alert_lead_time") || "10") * 60000;
+        const tgToken = localStorage.getItem("telegram_token");
+        const tgChatId = localStorage.getItem("telegram_chat_id");
+        const { primary } = getBackendUrl();
+
+        if (tgToken && tgChatId) {
+          Object.keys(dataRef.current).forEach(symbol => {
+            const item = dataRef.current[symbol];
+            if (item.binanceRate !== undefined && item.bybitRate !== undefined && item.nextFundingTime) {
+              const diff = Math.abs(item.binanceRate - item.bybitRate) * 100;
+              const timeToFunding = item.nextFundingTime - Date.now();
+
+              if (diff >= threshold && timeToFunding > 0 && timeToFunding <= leadTimeMs) {
+                const lastAlertWindow = alertedPairsRef.current.get(symbol);
+                if (lastAlertWindow !== item.nextFundingTime) {
+                  alertedPairsRef.current.set(symbol, item.nextFundingTime);
+
+                  // Send Alert
+                  fetch(`${primary}/api/telegram/send`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      token: tgToken,
+                      chatId: tgChatId,
+                      message: `🚨 *High Funding Alert: ${symbol}*\n\n` +
+                        `*Difference:* ${diff.toFixed(3)}%\n` +
+                        `*Binance:* ${item.binanceRate.toFixed(4)}%\n` +
+                        `*Bybit:* ${item.bybitRate.toFixed(4)}%\n` +
+                        `*Time to Funding:* ${Math.floor(timeToFunding / 60000)}m ${Math.floor((timeToFunding % 60000) / 1000)}s`,
+                      buttonText: `Trade ${symbol} on Bybit`,
+                      buttonUrl: `https://www.bybit.com/trade/usdt/${symbol}USDT`
+                    })
+                  }).catch(e => console.error("Telegram Alert Failed", e));
+                }
+              }
+            }
+          });
+        }
       } catch (err) {
         console.error("Polling Error", err);
       }
@@ -418,7 +508,7 @@ function App() {
     fetchIntervals();
 
     return () => clearInterval(pollInterval);
-  }, []);
+  }, [isLive]);
 
   const [searchQuery, setSearchQuery] = useState("");
 
