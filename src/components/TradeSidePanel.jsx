@@ -51,13 +51,20 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
 
     // Strategy recommendation based on funding rates
     const recommendation = (() => {
+        const diff = Math.abs(binanceRate - bybitRate);
+        const intervalBybit = data?.intervals?.bybit || 8;
+        const intervalBinance = data?.intervals?.binance || 8;
+        const minInterval = Math.min(intervalBybit, intervalBinance);
+        const dailyFreq = 24 / minInterval;
+
         if (binanceRate < bybitRate) {
             return {
                 longPlatform: "Binance",
                 shortPlatform: "Bybit",
                 longRate: binanceRate,
                 shortRate: bybitRate,
-                expectedProfit: Math.abs(bybitRate - binanceRate)
+                expectedProfit: diff,
+                expectedProfit24h: diff * dailyFreq
             };
         } else {
             return {
@@ -65,7 +72,8 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
                 shortPlatform: "Binance",
                 longRate: bybitRate,
                 shortRate: binanceRate,
-                expectedProfit: Math.abs(binanceRate - bybitRate)
+                expectedProfit: diff,
+                expectedProfit24h: diff * dailyFreq
             };
         }
     })();
@@ -363,7 +371,7 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
                     }
                 }
 
-                addLog(`Arbitrage position opened! Expected profit: ${recommendation.expectedProfit.toFixed(4)}%`, "success");
+                addLog(`Arbitrage position opened! Expected profit: ${recommendation.expectedProfit.toFixed(4)}% (Next) | ${recommendation.expectedProfit24h.toFixed(4)}% (24h)`, "success");
 
             } else {
                 // Individual trade

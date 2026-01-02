@@ -274,10 +274,19 @@ function App() {
         if (item.binanceRate !== undefined && item.bybitRate !== undefined) {
           spread = Math.abs(binanceRatePct - bybitRatePct);
           diff = binanceRatePct - bybitRatePct;
-          apr = spread * 3 * 365;
+
+          // Interval Lookup via Ref (fallback)
+          const intervals = intervalMapRef.current[item.symbol] || {};
+          const bybitInt = item.fundingIntervalHours || intervals.bybit || 8;
+          const binanceInt = intervals.binance || 8;
+
+          // Use the higher frequency (smaller interval) for APR projection
+          // This is a conservative estimate of the opportunities per day
+          const freqPerDay = 24 / Math.min(bybitInt, binanceInt);
+          apr = spread * freqPerDay * 365;
         }
 
-        // Interval Lookup via Ref (fallback)
+        // Already calculated above in apr block, but for the return structure:
         const intervals = intervalMapRef.current[item.symbol] || {};
         const bybitInt = item.fundingIntervalHours || intervals.bybit || null;
         const binanceInt = intervals.binance || null; // Binance currently only in metadata
@@ -336,6 +345,11 @@ function App() {
 
   // Toast on Live Mode Change & Trigger WebSocket
   useEffect(() => {
+    // RESET STALE DATA: Clear the data cache when switching modes
+    dataRef.current = {};
+    setData([]);
+    console.log("🔄 Mode switched: Resetting symbol data cache.");
+
     const mode = isLive ? "LIVE" : "TESTNET";
     const { primary } = getBackendUrl();
 
