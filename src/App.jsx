@@ -16,8 +16,10 @@ import { cn } from "@/lib/utils";
 
 // --- API Helpers ---
 
+// --- API Helpers ---
+
 const getBackendUrl = () => {
-  const primary = localStorage.getItem("primary_backend_url") || "https://vats147-bianance-bot.hf.space";
+  const primary = localStorage.getItem("primary_backend_url") || "https://bianance-bot.onrender.com";
   const backup = localStorage.getItem("backup_backend_url");
   return { primary, backup };
 };
@@ -177,8 +179,8 @@ function App() {
 
   // Load telegram config and auto-trade symbols from localStorage
   useEffect(() => {
-    // Enforcement: Force reset primary backend URL to Hugging Face (ONLY in production)
-    const targetUrl = "https://vats147-bianance-bot.hf.space";
+    // Enforcement: Force reset primary backend URL to Render (ONLY in production)
+    const targetUrl = "https://bianance-bot.onrender.com";
     const currentPrimary = localStorage.getItem("primary_backend_url");
     const isLocal = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
 
@@ -224,12 +226,6 @@ function App() {
   // symbol -> { binanceRate, bybitRate, ... }
   const dataRef = useRef({});
   const alertedPairsRef = useRef(new Map()); // symbol -> lastFundingTimeAlerted
-
-  const getBackendUrl = () => {
-    const primary = localStorage.getItem("primary_backend_url") || "https://vats147-bianance-bot.hf.space";
-    const backup = localStorage.getItem("backup_backend_url");
-    return { primary, backup };
-  };
 
   const intervalMapRef = useRef({}); // Use Ref to avoid stale closure in setInterval
   const [metadataCount, setMetadataCount] = useState(0);
