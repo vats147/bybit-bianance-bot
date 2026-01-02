@@ -223,14 +223,24 @@ class BinanceWebSocketManager:
                     await asyncio.sleep(5)
     
     def _run_loop(self):
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
+        loop = asyncio.new_event_loop()
+        self.loop = loop
+        asyncio.set_event_loop(loop)
         try:
-            self.loop.run_until_complete(self._connect())
+            loop.run_until_complete(self._connect())
         except Exception as e:
             print(f"WS Loop Error: {e}")
         finally:
-            self.loop.close()
+            try:
+                # Cancel pending tasks to ensure clean exit
+                tasks = asyncio.all_tasks(loop)
+                for task in tasks:
+                    task.cancel()
+                if tasks:
+                    loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
+                loop.close()
+            except Exception as e:
+                print(f"Error closing loop: {e}")
 
 
     def start(self, is_live=False):
@@ -362,14 +372,24 @@ class BybitWebSocketManager:
                     await asyncio.sleep(5)
     
     def _run_loop(self):
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
+        loop = asyncio.new_event_loop()
+        self.loop = loop
+        asyncio.set_event_loop(loop)
         try:
-            self.loop.run_until_complete(self._connect())
+            loop.run_until_complete(self._connect())
         except Exception as e:
-            print(f"Bybit WS Loop Error: {e}")
+            print(f"WS Loop Error: {e}")
         finally:
-            self.loop.close()
+            try:
+                # Cancel pending tasks to ensure clean exit
+                tasks = asyncio.all_tasks(loop)
+                for task in tasks:
+                    task.cancel()
+                if tasks:
+                    loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
+                loop.close()
+            except Exception as e:
+                print(f"Error closing loop: {e}")
 
     def start(self, is_live=False):
         if self.running:
