@@ -319,21 +319,40 @@ class BybitWebSocketManager:
                     # Search suggests "tickers.USDT" might not be an official "all" but is a common pattern for some categories.
                     # Let's try to subscribe dynamically by fetching symbols once.
                     
+                    # Subscribe to symbols
                     try:
-                        resp = requests.get(BYBIT_API_URL if self.is_live else BYBIT_API_TESTNET_URL, params={"category": "linear"})
+                        print("DEBUG: Fetching Bybit symbols for WS subscription...")
+                        loop = asyncio.get_event_loop()
+                        resp = await loop.run_in_executor(None, functools.partial(requests.get, BYBIT_API_URL if self.is_live else BYBIT_API_TESTNET_URL, params={"category": "linear"}))
+                        
                         if resp.status_code == 200:
                             s_data = resp.json()
                             if s_data.get("retCode") == 0:
                                 symbols = [f"tickers.{item['symbol']}" for item in s_data["result"]["list"] if item["symbol"].endswith("USDT")]
-                                # Bybit has a limit per subscription message (usually 10-20), but we can send multiple or 
-                                # try a bulk one if supported. Let's send in chunks of 10.
-                                chunk_size = 10
-                                for i in range(0, min(len(symbols), 500), chunk_size): # Limit to 500 to avoid overloading
-                                    chunk = symbols[i : i + chunk_size]
-                                    await ws.send(json.dumps({"op": "subscribe", "args": chunk}))
+                                print(f"DEBUG: Found {len(symbols)} Bybit symbols.")
+                                
+                                if not symbols:
+                                    print("WARN: No Bybit symbols found. Subscribing to default BTCUSDT.")
+                                    await ws.send(json.dumps({"op": "subscribe", "args": ["tickers.BTCUSDT", "tickers.ETHUSDT"]}))
+                                else:
+                                    # Subscribe in chunks
+                                    chunk_size = 10
+                                    for i in range(0, min(len(symbols), 500), chunk_size):
+                                        chunk = symbols[i : i + chunk_size]
+                                        await ws.send(json.dumps({"op": "subscribe", "args": chunk}))
+                                        await asyncio.sleep(0.1) # Prevent flooding
+                                    print(f"DEBUG: Subscribed to {min(len(symbols), 500)} symbols.")
+                            else:
+                                print(f"Bybit API Error (RetCode {s_data.get('retCode')}): {s_data.get('retMsg')}")
+                                raise Exception("Bybit API RetCode Error")
+                        else:
+                            print(f"Bybit API HTTP Error: {resp.status_code}")
+                            raise Exception("Bybit API HTTP Error")
+                            
                     except Exception as e:
                         print(f"Bybit WS Subscription error: {e}")
-                        await ws.send(json.dumps({"op": "subscribe", "args": ["tickers.BTCUSDT"]}))
+                        print("Fallback: Subscribing to default tickers.")
+                        await ws.send(json.dumps({"op": "subscribe", "args": ["tickers.BTCUSDT", "tickers.ETHUSDT", "tickers.SOLUSDT"]}))
                     
                     async for message in ws:
                         if not self.running:
@@ -766,6 +785,34 @@ async def execute_binance_logic(api_key, api_secret, symbol, side, qty, leverage
             print(f"Binance Leverage Error (Non-fatal): {e}")
 
         # 2. Place Order
+        # Fetch symbol info for precision
+        try:
+            info_url = f"{base_url}/fapi/v1/exchangeInfo"
+            info_res = requests.get(info_url)
+            if info_res.status_code == 200:
+                s_info = info_res.json()
+                fsym = symbol + "USDT" if not symbol.endswith("USDT") else symbol
+                target_symbol = next((s for s in s_info["symbols"] if s["symbol"] == fsym), None)
+                if target_symbol:
+                    # Quantity Precision
+                    qty_precision = target_symbol.get("quantityPrecision", 2)
+                    
+                    # Also check LOT_SIZE filter if available for stepSize (more accurate)
+                    for f in target_symbol.get("filters", []):
+                        if f["filterType"] == "LOT_SIZE":
+                            step_size = float(f["stepSize"])
+                            if step_size > 0:
+                                import math
+                                # Calculate decimals from stepSize (e.g. 0.001 -> 3)
+                                qty_precision = int(round(-math.log(step_size, 10), 0))
+                    
+                    # Round qty
+                    qty = round(float(qty), qty_precision)
+                    # Use format to avoid scientific notation
+                    qty = f"{qty:.{qty_precision}f}"
+        except Exception as e:
+            print(f"Precision Fetch Error (Non-fatal, using default): {e}")
+
         params = {
             "symbol": symbol + "USDT" if not symbol.endswith("USDT") else symbol,
             "side": side.upper(),
