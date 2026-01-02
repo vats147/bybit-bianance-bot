@@ -134,9 +134,13 @@ BYBIT_WS_LIVE = "wss://stream.bybit.com/v5/public/linear"
 BYBIT_WS_TESTNET = "wss://stream-testnet.bybit.com/v5/public/linear"
 
 # Default Keys from Env or Hardcoded (Fallback)
+# Default Keys from Env or Hardcoded (Fallback)
 DEFAULT_BYBIT_API_KEY = os.getenv("BYBIT_API_KEY", "GS68TldhIYqdRUOz4V")
 DEFAULT_BYBIT_SECRET = os.getenv("BYBIT_SECRET", "b5suxCOFWQsV2IoGDZ2HnNyhxDvt4NQNAReK")
 BYBIT_DEMO_URL = os.getenv("BYBIT_DEMO_URL", "https://api-demo.bybit.com")
+
+# Cache for Instrument Info (qtyStep, minOrderQty)
+INSTRUMENT_CACHE = {}
 
 # --- BINANCE WEBSOCKET CONFIG ---
 # Note: Binance testnet market data streams may use the same URL as live (stream.binancefuture.com)
@@ -612,6 +616,41 @@ async def place_order(
 
 # --- REUSABLE LOGIC ---
 
+async def get_bybit_instrument_info_cached(symbol):
+    if symbol in INSTRUMENT_CACHE:
+        return INSTRUMENT_CACHE[symbol]
+    
+    try:
+        url = "https://api.bybit.com/v5/market/instruments-info"
+        params = {"category": "linear", "symbol": symbol + "USDT"}
+        
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(None, functools.partial(requests.get, url, params=params))
+        data = response.json()
+        
+        if data["retCode"] == 0 and len(data["result"]["list"]) > 0:
+             info = data["result"]["list"][0]["lotSizeFilter"]
+             INSTRUMENT_CACHE[symbol] = {
+                 "qtyStep": float(info["qtyStep"]),
+                 "minOrderQty": float(info["minOrderQty"]),
+                 "maxOrderQty": float(info["maxOrderQty"])
+             }
+             return INSTRUMENT_CACHE[symbol]
+    except Exception as e:
+        print(f"Instrument Info Error: {e}")
+    
+    # Fallback default
+    return {"qtyStep": 0.001, "minOrderQty": 0.001, "maxOrderQty": 10000}
+
+def adjust_qty_to_step(qty, step_size, min_qty):
+    if qty < min_qty: return min_qty
+    # Round down to nearest step
+    import math
+    steps = math.floor(qty / step_size)
+    adjusted = steps * step_size
+    # Fix floating point precision
+    return round(adjusted, 10)
+
 async def execute_bybit_logic(api_key, api_secret, symbol, side, qty, leverage, category="linear"):
     try:
         endpoint = "/v5/order/create"
@@ -640,13 +679,18 @@ async def execute_bybit_logic(api_key, api_secret, symbol, side, qty, leverage, 
         except Exception as e:
             print(f"Set Leverage Warning: {e}")
 
-        # 2. Place Market Order
+        # 2. Prepare Order with Correct Precision
+        # Fetch instrument info to fix "Qty invalid" errors
+        inst_info = await get_bybit_instrument_info_cached(symbol)
+        adjusted_qty = adjust_qty_to_step(float(qty), inst_info["qtyStep"], inst_info["minOrderQty"])
+        print(f"DEBUG: Adjusting Qty for {symbol}: {qty} -> {adjusted_qty} (Step: {inst_info['qtyStep']})")
+
         order_payload = {
             "category": category,
             "symbol": symbol + "USDT" if not symbol.endswith("USDT") else symbol,
             "side": side,
             "orderType": "Market",
-            "qty": str(qty),
+            "qty": str(adjusted_qty),
         }
         
         payload_json = json.dumps(order_payload)
