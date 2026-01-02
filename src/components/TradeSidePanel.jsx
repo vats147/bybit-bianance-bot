@@ -121,7 +121,7 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
         const bybitSecret = localStorage.getItem("user_bybit_secret");
         const binanceKey = localStorage.getItem("user_binance_key");
         const binanceSecret = localStorage.getItem("user_binance_secret");
-        const backendUrl = localStorage.getItem("primary_backend_url") || "http://127.0.0.1:8000";
+        const backendUrl = localStorage.getItem("primary_backend_url") || "https://vats147-bianance-bot.hf.space";
 
         try {
             const res = await fetch(`${backendUrl}/api/positions?symbol=${symbol}`, {
@@ -179,7 +179,7 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
         const binanceSecret = localStorage.getItem("user_binance_secret") || "";
         const isTestnet = localStorage.getItem("user_binance_testnet") !== "false";
 
-        const backendUrl = localStorage.getItem("primary_backend_url") || "http://127.0.0.1:8000";
+        const backendUrl = localStorage.getItem("primary_backend_url") || "https://vats147-bianance-bot.hf.space";
 
         // Smart quantity calculation with proper precision based on price
         // Expensive tokens (BTC, ETH) need more decimals, cheap tokens need integers
@@ -758,7 +758,7 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
                                 variant="destructive"
                                 className="w-full font-bold h-9 text-xs animate-pulse bg-red-600 mt-1"
                                 onClick={async () => {
-                                    const backendUrl = localStorage.getItem("primary_backend_url") || "http://127.0.0.1:8000";
+                                    const backendUrl = localStorage.getItem("primary_backend_url") || "https://vats147-bianance-bot.hf.space";
                                     try {
                                         await fetch(`${backendUrl}/api/close-all-positions`, {
                                             method: "POST", headers: {

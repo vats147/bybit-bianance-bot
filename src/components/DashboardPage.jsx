@@ -17,7 +17,7 @@ export function DashboardPage() {
     const toast = useToast();
 
     const getBackendUrl = () => {
-        const primary = localStorage.getItem("primary_backend_url") || "http://127.0.0.1:8000";
+        const primary = localStorage.getItem("primary_backend_url") || "https://vats147-bianance-bot.hf.space";
         const backup = localStorage.getItem("backup_backend_url");
         return { primary, backup };
     };

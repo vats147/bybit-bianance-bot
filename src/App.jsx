@@ -177,6 +177,14 @@ function App() {
 
   // Load telegram config and auto-trade symbols from localStorage
   useEffect(() => {
+    // Enforcement: Force reset primary backend URL to Hugging Face
+    const targetUrl = "https://vats147-bianance-bot.hf.space";
+    const currentPrimary = localStorage.getItem("primary_backend_url");
+    if (currentPrimary !== targetUrl) {
+      console.log(`Enforcing backend URL: ${currentPrimary} -> ${targetUrl}`);
+      localStorage.setItem("primary_backend_url", targetUrl);
+    }
+
     const savedToken = localStorage.getItem("telegram_token") || '';
     const savedChatId = localStorage.getItem("telegram_chat_id") || '';
     setTelegramConfig({ token: savedToken, chatId: savedChatId });
