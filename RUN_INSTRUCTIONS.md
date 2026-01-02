@@ -2,6 +2,7 @@
 
 This project now consists of a **Python Backend** (for API handling) and a **React Frontend** (for UI). You need to run both terminals.
 
+
 ## 1. Start the Python Backend
 This server handles the API credentials and fetches data from Binance and CoinSwitch.
 
