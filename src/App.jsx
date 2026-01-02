@@ -928,11 +928,21 @@ function App() {
                           </TableCell>
                           <TableCell className="text-right sticky right-0 z-10 bg-background shadow-[-1px_0_5px_rgba(0,0,0,0.05)] border-l">
                             <div className="flex justify-end gap-1">
-                              <Tooltip content="Open Trade Panel" side="top">
+                              <Tooltip content={
+                                (Math.abs(item.binanceRate) === 0 || Math.abs(item.bybitRate) === 0)
+                                  ? "Trade Locked: 0% Rate detected"
+                                  : "Open Trade Panel"
+                              } side="top">
                                 <Button
                                   size="sm"
-                                  className="h-8 bg-blue-600 hover:bg-blue-700 text-white font-bold px-2 sm:px-3 shadow-sm border border-blue-500/50"
+                                  className={cn(
+                                    "h-8 font-bold px-2 sm:px-3 shadow-sm border",
+                                    (Math.abs(item.binanceRate) === 0 || Math.abs(item.bybitRate) === 0)
+                                      ? "bg-gray-500/20 text-gray-500 border-gray-500/30 cursor-not-allowed"
+                                      : "bg-blue-600 hover:bg-blue-700 text-white border-blue-500/50"
+                                  )}
                                   onClick={() => setSelectedOpportunity(item)}
+                                  disabled={Math.abs(item.binanceRate) === 0 || Math.abs(item.bybitRate) === 0}
                                 >
                                   Trade
                                 </Button>
