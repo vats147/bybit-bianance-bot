@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { X, Settings, Wallet, CheckCircle2, Calculator, TrendingUp, TrendingDown, Zap, ArrowRightLeft, AlertTriangle, ShieldCheck, Activity } from "lucide-react";
+import { X, Settings, Wallet, CheckCircle2, Calculator, TrendingUp, TrendingDown, Zap, ArrowRightLeft, AlertTriangle, ShieldCheck, Activity, Info, Loader2, DollarSign, Target, Clock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/toast";
 import { cn } from "@/lib/utils";
@@ -12,6 +12,28 @@ import {
     DialogTitle,
     DialogTrigger,
 } from "@/components/ui/dialog";
+
+// Exchange Logo URLs
+const EXCHANGE_LOGOS = {
+    binance: "https://cryptologos.cc/logos/binance-coin-bnb-logo.png?v=040",
+    bybit: "https://s2.coinmarketcap.com/static/img/exchanges/64x64/521.png"
+};
+
+// Tooltip component
+const Tooltip = ({ children, content }) => {
+    const [show, setShow] = useState(false);
+    return (
+        <span className="relative inline-flex items-center" onMouseEnter={() => setShow(true)} onMouseLeave={() => setShow(false)}>
+            {children}
+            {show && (
+                <span className="absolute z-50 bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-2 text-xs bg-gray-900 border border-white/20 text-white rounded-lg shadow-xl whitespace-nowrap">
+                    {content}
+                    <span className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-gray-900"></span>
+                </span>
+            )}
+        </span>
+    );
+};
 
 export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
     const toast = useToast();
@@ -29,22 +51,35 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
     const [pendingTrade, setPendingTrade] = useState(null);
     const [positions, setPositions] = useState({ bybit: null, binance: null });
     const [closeStep, setCloseStep] = useState(0);
+    const [showCloseDialog, setShowCloseDialog] = useState(false);
+    const [closingPositions, setClosingPositions] = useState(false);
 
     // Dropdown states
     const [showMarginDropdown, setShowMarginDropdown] = useState(false);
     const [showLeverageDropdown, setShowLeverageDropdown] = useState(false);
 
+    // Balance states
+    const [balances, setBalances] = useState({ binance: null, bybit: null });
+    const [balanceLoading, setBalanceLoading] = useState(false);
+
+    // Leverage editing state
+    const [isEditingLeverage, setIsEditingLeverage] = useState(false);
+    const [leverageInputValue, setLeverageInputValue] = useState("");
+
     // Available options
     const marginModes = ["Cross", "Isolated"];
-    const leverageOptions = [1, 2, 3, 5, 10, 20, 25, 50, 75, 100];
+    const leverageOptions = [1, 2, 3, 5, 6, 10, 15, 20, 25, 50, 75, 100];
 
     // Derived from data
     const symbol = data?.symbol || "BTC";
     const markPrice = data?.markPrice || 0;
-    const binanceRate = data?.binanceRate || 0;
-    const bybitRate = data?.bybitRate || 0;
+    // Rates are stored as decimals (0.0225 = 2.25%), multiply by 100 for display
+    const binanceRateRaw = data?.binanceRate || 0;
+    const bybitRateRaw = data?.bybitRate || 0;
+    const binanceRate = binanceRateRaw * 100; // Convert to percentage
+    const bybitRate = bybitRateRaw * 100;     // Convert to percentage
     const spread = data?.spread || 0;
-    const balance = 175.1054; // Mock balance
+    const balance = 175.1054; // Mock balance - kept for backward compatibility
 
     // Safety Lock
     const isTradeLocked = Math.abs(binanceRate) === 0 || Math.abs(bybitRate) === 0;
@@ -52,10 +87,15 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
     // Strategy recommendation based on funding rates
     const recommendation = (() => {
         const diff = Math.abs(binanceRate - bybitRate);
-        const intervalBybit = data?.intervals?.bybit || 8;
-        const intervalBinance = data?.intervals?.binance || 8;
+        const intervalBybit = data?.bybitInterval || 8;
+        const intervalBinance = data?.binanceInterval || 8;
         const minInterval = Math.min(intervalBybit, intervalBinance);
         const dailyFreq = 24 / minInterval;
+
+        // Check if both sides are earning (rare but profitable scenario)
+        const binanceEarning = binanceRate < 0; // negative rate = longs pay shorts (we go long = we receive)
+        const bybitEarning = bybitRate > 0;     // positive rate = shorts pay longs (we go short = we receive)
+        const twoSideEarning = (binanceRate < 0 && bybitRate > 0) || (binanceRate > 0 && bybitRate < 0);
 
         if (binanceRate < bybitRate) {
             return {
@@ -64,7 +104,14 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
                 longRate: binanceRate,
                 shortRate: bybitRate,
                 expectedProfit: diff,
-                expectedProfit24h: diff * dailyFreq
+                expectedProfit24h: diff * dailyFreq,
+                twoSideEarning,
+                longReason: binanceRate < 0
+                    ? `Binance rate is negative (${binanceRate.toFixed(4)}%), so LONG positions RECEIVE funding from shorts`
+                    : `Binance rate (${binanceRate.toFixed(4)}%) is lower than Bybit, minimizing funding costs`,
+                shortReason: bybitRate > 0
+                    ? `Bybit rate is positive (${bybitRate.toFixed(4)}%), so SHORT positions RECEIVE funding from longs`
+                    : `Bybit rate (${bybitRate.toFixed(4)}%) is higher, so shorting here captures the spread`
             };
         } else {
             return {
@@ -73,7 +120,14 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
                 longRate: bybitRate,
                 shortRate: binanceRate,
                 expectedProfit: diff,
-                expectedProfit24h: diff * dailyFreq
+                expectedProfit24h: diff * dailyFreq,
+                twoSideEarning,
+                longReason: bybitRate < 0
+                    ? `Bybit rate is negative (${bybitRate.toFixed(4)}%), so LONG positions RECEIVE funding from shorts`
+                    : `Bybit rate (${bybitRate.toFixed(4)}%) is lower than Binance, minimizing funding costs`,
+                shortReason: binanceRate > 0
+                    ? `Binance rate is positive (${binanceRate.toFixed(4)}%), so SHORT positions RECEIVE funding from longs`
+                    : `Binance rate (${binanceRate.toFixed(4)}%) is higher, so shorting here captures the spread`
             };
         }
     })();
@@ -85,6 +139,8 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
             if (spread > 0) {
                 addLog(`Strategy: Long ${recommendation.longPlatform} (${recommendation.longRate.toFixed(4)}%), Short ${recommendation.shortPlatform} (${recommendation.shortRate.toFixed(4)}%)`, "info");
             }
+            // Fetch balances when panel opens
+            fetchBalances();
         }
     }, [isOpen, symbol]);
 
@@ -109,17 +165,101 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
         const val = Number(e.target.value);
         setSliderValue(val);
         const margin = (balance * val) / 100;
-        const totalValue = margin * leverage;
-        setAmount(totalValue.toFixed(2));
+        setAmount(margin.toFixed(2));
     };
 
     const handleAmountChange = (e) => {
         setAmount(e.target.value);
         const val = Number(e.target.value);
-        if (val && leverage && balance) {
-            const margin = val / leverage;
+        if (val && balance) {
+            const margin = val;
             const pct = (margin / balance) * 100;
             setSliderValue(Math.min(100, Math.max(0, pct)));
+        }
+    };
+
+    const fetchBalances = async () => {
+        if (!isOpen) return;
+        setBalanceLoading(true);
+
+        const bybitKey = localStorage.getItem("user_bybit_key");
+        const bybitSecret = localStorage.getItem("user_bybit_secret");
+        const binanceKey = localStorage.getItem("user_binance_key");
+        const binanceSecret = localStorage.getItem("user_binance_secret");
+        const isTestnet = localStorage.getItem("user_binance_testnet") !== "false";
+        const backendUrl = localStorage.getItem("primary_backend_url") || "https://vats147-bianance-bot.hf.space";
+
+        try {
+            // Only fetch balances for exchanges with valid keys
+            const hasBybitKeys = bybitKey && bybitSecret;
+            const hasBinanceKeys = binanceKey && binanceSecret;
+
+            const fetchPromises = [];
+
+            // Bybit balance fetch
+            if (hasBybitKeys) {
+                fetchPromises.push(
+                    fetch(`${backendUrl}/api/wallet-balance?is_live=false`, {
+                        headers: {
+                            "X-User-Bybit-Key": bybitKey,
+                            "X-User-Bybit-Secret": bybitSecret
+                        }
+                    }).catch(e => ({ ok: false, error: e, exchange: 'bybit' }))
+                );
+            } else {
+                fetchPromises.push(Promise.resolve({ ok: false, noKeys: true, exchange: 'bybit' }));
+            }
+
+            // Binance balance fetch
+            if (hasBinanceKeys) {
+                fetchPromises.push(
+                    fetch(`${backendUrl}/api/binance/wallet-balance?is_testnet=${isTestnet}`, {
+                        headers: {
+                            "X-User-Binance-Key": binanceKey,
+                            "X-User-Binance-Secret": binanceSecret
+                        }
+                    }).catch(e => ({ ok: false, error: e, exchange: 'binance' }))
+                );
+            } else {
+                fetchPromises.push(Promise.resolve({ ok: false, noKeys: true, exchange: 'binance' }));
+            }
+
+            const [bybitRes, binanceRes] = await Promise.all(fetchPromises);
+
+            // Process Bybit balance
+            let bybitBalance = null;
+            let bybitNoKeys = bybitRes.noKeys;
+            if (bybitRes.ok) {
+                const bybitData = await bybitRes.json();
+                if (bybitData.retCode === 0 && bybitData.result?.list?.length > 0) {
+                    const account = bybitData.result.list[0];
+                    bybitBalance = parseFloat(account.totalAvailableBalance || account.totalWalletBalance || 0);
+                }
+            }
+
+            // Process Binance balance
+            let binanceBalance = null;
+            let binanceNoKeys = binanceRes.noKeys;
+            if (binanceRes.ok) {
+                const binanceData = await binanceRes.json();
+                if (Array.isArray(binanceData)) {
+                    // Sum all USDT balances
+                    const usdtAsset = binanceData.find(a => a.asset === "USDT");
+                    binanceBalance = parseFloat(usdtAsset?.availableBalance || 0);
+                }
+            }
+
+            setBalances({ bybit: bybitBalance, binance: binanceBalance });
+
+            // Build informative log message
+            const bybitMsg = bybitNoKeys ? "No Keys" : (bybitBalance !== null ? `${bybitBalance.toFixed(2)}` : "Error");
+            const binanceMsg = binanceNoKeys ? "No Keys" : (binanceBalance !== null ? `${binanceBalance.toFixed(2)}` : "Error");
+            addLog(`Balances - Bybit: ${bybitMsg} USDT, Binance: ${binanceMsg} USDT`, bybitNoKeys || binanceNoKeys ? "warn" : "info");
+        } catch (e) {
+            console.error("Failed to fetch balances:", e);
+            addLog("Failed to fetch balances", "error");
+        } finally {
+            setBalanceLoading(false);
         }
     };
 
@@ -178,11 +318,45 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
             return;
         }
 
+        // Balance validation
+        const requiredMargin = Number(amount);
+
+        if (platform === "Both") {
+            // For arbitrage trades, check both platforms
+            if (balances.binance !== null && balances.binance < requiredMargin) {
+                const msg = `Insufficient Binance balance. Available: ${balances.binance.toFixed(2)} USDT, Required: ${requiredMargin.toFixed(2)} USDT`;
+                addLog(msg, "error");
+                toast.error(msg);
+                return;
+            }
+            if (balances.bybit !== null && balances.bybit < requiredMargin) {
+                const msg = `Insufficient Bybit balance. Available: ${balances.bybit.toFixed(2)} USDT, Required: ${requiredMargin.toFixed(2)} USDT`;
+                addLog(msg, "error");
+                toast.error(msg);
+                return;
+            }
+        } else if (platform === "Binance") {
+            if (balances.binance !== null && balances.binance < requiredMargin) {
+                const msg = `Insufficient Binance balance. Available: ${balances.binance.toFixed(2)} USDT, Required: ${requiredMargin.toFixed(2)} USDT`;
+                addLog(msg, "error");
+                toast.error(msg);
+                return;
+            }
+        } else if (platform === "Bybit") {
+            if (balances.bybit !== null && balances.bybit < requiredMargin) {
+                const msg = `Insufficient Bybit balance. Available: ${balances.bybit.toFixed(2)} USDT, Required: ${requiredMargin.toFixed(2)} USDT`;
+                addLog(msg, "error");
+                toast.error(msg);
+                return;
+            }
+        }
+
         setLoading(true);
 
         // Get API keys from localStorage (match keys from SettingsPage)
         const bybitKey = localStorage.getItem("user_bybit_key") || "";
         const bybitSecret = localStorage.getItem("user_bybit_secret") || "";
+        const bybitIsLive = localStorage.getItem("user_bybit_live") === "true";
         const binanceKey = localStorage.getItem("user_binance_key") || "";
         const binanceSecret = localStorage.getItem("user_binance_secret") || "";
         const isTestnet = localStorage.getItem("user_binance_testnet") !== "false";
@@ -212,7 +386,7 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
             return Math.floor(rawQty * multiplier) / multiplier;
         };
 
-        const qty = calculateQty(Number(amount), markPrice);
+        const qty = calculateQty(Number(amount) * leverage, markPrice);
 
         try {
             if (side === "Schedule") {
@@ -263,8 +437,8 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
                 const longPlatform = recommendation.longPlatform;
                 const longSide = "Buy";
                 if (longPlatform === "Bybit") {
-                    addLog(`Placing Long on Bybit - ${symbol} @ ${leverage}x...`, "info");
-                    const res = await fetch(`${backendUrl}/api/place-order`, {
+                    addLog(`Placing Long on Bybit${bybitIsLive ? ' (LIVE)' : ''} - ${symbol} @ ${leverage}x...`, "info");
+                    const res = await fetch(`${backendUrl}/api/place-order?is_live=${bybitIsLive}`, {
                         method: "POST",
                         headers: {
                             "Content-Type": "application/json",
@@ -319,8 +493,8 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
                 const shortPlatform = recommendation.shortPlatform;
                 const shortSide = "Sell";
                 if (shortPlatform === "Bybit") {
-                    addLog(`Placing Short on Bybit - ${symbol} @ ${leverage}x...`, "info");
-                    const res = await fetch(`${backendUrl}/api/place-order`, {
+                    addLog(`Placing Short on Bybit${bybitIsLive ? ' (LIVE)' : ''} - ${symbol} @ ${leverage}x...`, "info");
+                    const res = await fetch(`${backendUrl}/api/place-order?is_live=${bybitIsLive}`, {
                         method: "POST",
                         headers: {
                             "Content-Type": "application/json",
@@ -465,34 +639,165 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
                 {/* Content - Scrollable */}
                 <div className="flex-1 overflow-y-auto p-4 space-y-4 text-sm text-gray-300">
 
-                    {/* Strategy Recommendation Card */}
+                    {/* Compact Balance Display with Exchange Logos */}
+                    <div className="flex items-center gap-2 text-xs">
+                        <div className="flex-1 flex items-center gap-2 bg-[#2b2b32] rounded px-2 py-1.5">
+                            <img src={EXCHANGE_LOGOS.binance} className="w-4 h-4 rounded-full" alt="Binance" />
+                            <span className="text-gray-400">Bn:</span>
+                            <span className="text-white font-bold font-mono">
+                                {balances.binance !== null ? `${balances.binance.toFixed(2)}` : "N/A"}
+                            </span>
+                        </div>
+                        <div className="flex-1 flex items-center gap-2 bg-[#2b2b32] rounded px-2 py-1.5">
+                            <img src={EXCHANGE_LOGOS.bybit} className="w-4 h-4 rounded-full" alt="Bybit" />
+                            <span className="text-gray-400">Bb:</span>
+                            <span className="text-white font-bold font-mono">
+                                {balances.bybit !== null ? `${balances.bybit.toFixed(2)}` : "N/A"}
+                            </span>
+                        </div>
+                        <button
+                            onClick={fetchBalances}
+                            className="text-blue-400 hover:text-blue-300 p-1"
+                            disabled={balanceLoading}
+                        >
+                            {balanceLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : "↻"}
+                        </button>
+                    </div>
+
+                    {/* Strategy Recommendation Card with Tooltips and 2-Side Earning Badge */}
                     {spread > 0 && (
                         <div className="bg-gradient-to-r from-green-500/10 to-blue-500/10 border border-green-500/30 rounded-lg p-3 space-y-2">
-                            <div className="flex items-center gap-2 text-white font-bold text-sm">
-                                <Zap className="w-4 h-4 text-yellow-500" />
-                                Strategy Recommendation
+                            <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-2 text-white font-bold text-sm">
+                                    <Zap className="w-4 h-4 text-yellow-500" />
+                                    Strategy
+                                </div>
+                                {recommendation.twoSideEarning && (
+                                    <span className="px-2 py-0.5 bg-gradient-to-r from-green-500 to-yellow-500 text-black text-[10px] font-bold rounded-full animate-pulse">
+                                        🎯 2-SIDE EARNING
+                                    </span>
+                                )}
                             </div>
                             <div className="grid grid-cols-2 gap-2 text-xs">
-                                <div className="bg-green-500/20 rounded p-2 border border-green-500/30">
-                                    <div className="flex items-center gap-1 text-green-400 font-bold">
-                                        <TrendingUp className="w-3 h-3" /> Long
+                                <Tooltip content={recommendation.longReason}>
+                                    <div className="bg-green-500/20 rounded p-2 border border-green-500/30 cursor-help w-full">
+                                        <div className="flex items-center gap-1 text-green-400 font-bold">
+                                            <img
+                                                src={recommendation.longPlatform === "Binance" ? EXCHANGE_LOGOS.binance : EXCHANGE_LOGOS.bybit}
+                                                className="w-3 h-3 rounded-full"
+                                                alt={recommendation.longPlatform}
+                                            />
+                                            <TrendingUp className="w-3 h-3" /> Long
+                                            <Info className="w-3 h-3 text-gray-500 ml-auto" />
+                                        </div>
+                                        <div className="text-white font-bold">{recommendation.longPlatform}</div>
+                                        <div className="text-gray-400">{recommendation.longRate.toFixed(4)}%</div>
+                                        <div className="text-[9px] text-gray-500 mt-0.5">
+                                            {recommendation.longPlatform === "Binance" ? `${data?.binanceInterval || 8}H` : `${data?.bybitInterval || 8}H`} interval
+                                        </div>
                                     </div>
-                                    <div className="text-white font-bold">{recommendation.longPlatform}</div>
-                                    <div className="text-gray-400">{recommendation.longRate.toFixed(4)}%</div>
-                                </div>
-                                <div className="bg-red-500/20 rounded p-2 border border-red-500/30">
-                                    <div className="flex items-center gap-1 text-red-400 font-bold">
-                                        <TrendingDown className="w-3 h-3" /> Short
+                                </Tooltip>
+                                <Tooltip content={recommendation.shortReason}>
+                                    <div className="bg-red-500/20 rounded p-2 border border-red-500/30 cursor-help w-full">
+                                        <div className="flex items-center gap-1 text-red-400 font-bold">
+                                            <img
+                                                src={recommendation.shortPlatform === "Binance" ? EXCHANGE_LOGOS.binance : EXCHANGE_LOGOS.bybit}
+                                                className="w-3 h-3 rounded-full"
+                                                alt={recommendation.shortPlatform}
+                                            />
+                                            <TrendingDown className="w-3 h-3" /> Short
+                                            <Info className="w-3 h-3 text-gray-500 ml-auto" />
+                                        </div>
+                                        <div className="text-white font-bold">{recommendation.shortPlatform}</div>
+                                        <div className="text-gray-400">{recommendation.shortRate.toFixed(4)}%</div>
+                                        <div className="text-[9px] text-gray-500 mt-0.5">
+                                            {recommendation.shortPlatform === "Binance" ? `${data?.binanceInterval || 8}H` : `${data?.bybitInterval || 8}H`} interval
+                                        </div>
                                     </div>
-                                    <div className="text-white font-bold">{recommendation.shortPlatform}</div>
-                                    <div className="text-gray-400">{recommendation.shortRate.toFixed(4)}%</div>
-                                </div>
+                                </Tooltip>
                             </div>
-                            <div className="text-center text-xs text-green-400 font-mono">
-                                Expected Spread Profit: {recommendation.expectedProfit.toFixed(4)}%
+
+                            {/* Profit Estimates */}
+                            <div className="bg-black/20 rounded p-2 space-y-1">
+                                <div className="flex justify-between text-[10px]">
+                                    <span className="text-gray-400">Per Funding ({Math.min(data?.binanceInterval || 8, data?.bybitInterval || 8)}H)</span>
+                                    <span className="text-green-400 font-bold">+{recommendation.expectedProfit.toFixed(4)}%</span>
+                                </div>
+                                <div className="flex justify-between text-[10px]">
+                                    <span className="text-gray-400">Est. Daily (24H)</span>
+                                    <span className="text-green-400 font-bold">+{recommendation.expectedProfit24h.toFixed(4)}%</span>
+                                </div>
+                                {amount && Number(amount) > 0 && (
+                                    <>
+                                        <div className="border-t border-white/10 my-1"></div>
+
+                                        {/* Leverage Breakdown - Matches Bybit terminology */}
+                                        <div className="bg-gradient-to-r from-blue-500/10 to-purple-500/10 rounded p-2 mb-2 border border-blue-500/20">
+                                            <div className="text-[10px] text-blue-300 font-bold mb-1.5 flex items-center gap-1">
+                                                📊 Position Breakdown ({leverage}x Leverage)
+                                            </div>
+                                            <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[10px]">
+                                                <div className="flex justify-between">
+                                                    <span className="text-gray-400">IM (Initial Margin):</span>
+                                                    <span className="text-white font-mono font-bold">${Number(amount).toFixed(4)}</span>
+                                                </div>
+                                                <div className="flex justify-between">
+                                                    <span className="text-gray-400">Borrowed:</span>
+                                                    <span className="text-yellow-400 font-mono">${(Number(amount) * (leverage - 1)).toFixed(2)}</span>
+                                                </div>
+                                                <div className="flex justify-between col-span-2">
+                                                    <span className="text-gray-400">Position Value (per side):</span>
+                                                    <span className="text-cyan-400 font-mono">${(Number(amount) * leverage).toFixed(2)}</span>
+                                                </div>
+                                                <div className="flex justify-between col-span-2 border-t border-white/10 pt-1 mt-1">
+                                                    <span className="text-gray-400">Total Exposure (both sides):</span>
+                                                    <span className="text-green-400 font-bold font-mono">${(Number(amount) * leverage).toFixed(2)} × 2 = ${(Number(amount) * leverage * 2).toFixed(2)}</span>
+                                                </div>
+                                            </div>
+                                            <div className="text-[9px] text-gray-500 mt-1.5 border-t border-white/5 pt-1">
+                                                ℹ️ You deposit <span className="text-white">${Number(amount).toFixed(2)}</span> margin × {leverage}x = <span className="text-cyan-400">${(Number(amount) * leverage).toFixed(2)}</span> position per exchange
+                                            </div>
+                                        </div>
+
+                                        {/* Earnings based on Total Position */}
+                                        <div className="text-[10px] text-gray-500 mb-1">💰 Earnings on <span className="text-green-400 font-bold">${(Number(amount) * leverage * 2).toFixed(2)}</span> total position:</div>
+                                        <div className="flex justify-between text-xs">
+                                            <span className="text-gray-400 flex items-center gap-1">
+                                                <DollarSign className="w-3 h-3" /> Per funding
+                                            </span>
+                                            <span className="text-green-400 font-bold">
+                                                +${((Number(amount) * leverage * 2 * recommendation.expectedProfit) / 100).toFixed(4)}
+                                            </span>
+                                        </div>
+                                        <div className="flex justify-between text-xs">
+                                            <span className="text-gray-400 flex items-center gap-1">
+                                                <Target className="w-3 h-3" /> Daily (24H)
+                                            </span>
+                                            <span className="text-green-400 font-bold">
+                                                +${((Number(amount) * leverage * 2 * recommendation.expectedProfit24h) / 100).toFixed(4)}
+                                            </span>
+                                        </div>
+
+                                        {/* ROI on Your Initial Margin */}
+                                        <div className="border-t border-white/10 mt-2 pt-1">
+                                            <div className="flex justify-between text-xs">
+                                                <span className="text-purple-400 flex items-center gap-1">
+                                                    🎯 ROI on YOUR IM (${Number(amount).toFixed(2)})
+                                                </span>
+                                                <span className="text-purple-400 font-bold">
+                                                    +{(recommendation.expectedProfit24h * leverage * 2).toFixed(4)}%/day
+                                                </span>
+                                            </div>
+                                            <div className="text-[9px] text-gray-500 mt-0.5">
+                                                Deposit ${Number(amount).toFixed(2)} → earn ${((Number(amount) * leverage * 2 * recommendation.expectedProfit24h) / 100).toFixed(4)}/day
+                                            </div>
+                                        </div>
+                                    </>
+                                )}
                             </div>
                         </div>
                     )}
+
 
                     {/* Safety Alert */}
                     {isTradeLocked && (
@@ -541,19 +846,65 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
                             )}
                         </div>
 
-                        {/* Leverage Dropdown */}
+                        {/* Leverage Dropdown with Manual Input */}
                         <div className="flex-1 relative">
-                            <div
-                                className="dropdown-trigger bg-[#2b2b32] rounded-md px-3 py-2 flex justify-between items-center cursor-pointer hover:bg-[#32323a] border border-transparent hover:border-white/20"
-                                onClick={() => {
-                                    setShowLeverageDropdown(!showLeverageDropdown);
-                                    setShowMarginDropdown(false);
-                                }}
-                            >
-                                <span className="font-semibold text-yellow-500">{leverage}x</span>
-                                <span className={cn("text-xs text-gray-500 transition-transform", showLeverageDropdown && "rotate-180")}>▼</span>
-                            </div>
-                            {showLeverageDropdown && (
+                            {!isEditingLeverage ? (
+                                <div
+                                    className="dropdown-trigger bg-[#2b2b32] rounded-md px-3 py-2 flex justify-between items-center cursor-pointer hover:bg-[#32323a] border border-transparent hover:border-white/20"
+                                    onClick={(e) => {
+                                        // Check if click is directly on the leverage value (not dropdown arrow)
+                                        const clickedOnValue = e.target.closest('.leverage-value');
+                                        if (clickedOnValue) {
+                                            setIsEditingLeverage(true);
+                                            setLeverageInputValue(leverage.toString());
+                                            setShowLeverageDropdown(false);
+                                        } else {
+                                            setShowLeverageDropdown(!showLeverageDropdown);
+                                            setShowMarginDropdown(false);
+                                        }
+                                    }}
+                                >
+                                    <span className="leverage-value font-semibold text-yellow-500">{leverage}x</span>
+                                    <span className={cn("text-xs text-gray-500 transition-transform", showLeverageDropdown && "rotate-180")}>▼</span>
+                                </div>
+                            ) : (
+                                <div className="bg-[#2b2b32] rounded-md px-3 py-2 flex items-center border-2 border-yellow-500">
+                                    <input
+                                        type="number"
+                                        value={leverageInputValue}
+                                        onChange={(e) => setLeverageInputValue(e.target.value)}
+                                        onKeyDown={(e) => {
+                                            if (e.key === 'Enter') {
+                                                const val = parseInt(leverageInputValue);
+                                                if (!isNaN(val) && val >= 1 && val <= 100) {
+                                                    setLeverage(val);
+                                                    addLog(`Leverage changed to ${val}x`, "info");
+                                                    setIsEditingLeverage(false);
+                                                } else {
+                                                    toast.error("Leverage must be between 1x and 100x");
+                                                    setLeverageInputValue(leverage.toString());
+                                                }
+                                            } else if (e.key === 'Escape') {
+                                                setIsEditingLeverage(false);
+                                                setLeverageInputValue("");
+                                            }
+                                        }}
+                                        onBlur={() => {
+                                            const val = parseInt(leverageInputValue);
+                                            if (!isNaN(val) && val >= 1 && val <= 100) {
+                                                setLeverage(val);
+                                                addLog(`Leverage changed to ${val}x`, "info");
+                                            }
+                                            setIsEditingLeverage(false);
+                                        }}
+                                        autoFocus
+                                        className="bg-transparent text-yellow-500 font-semibold w-full outline-none"
+                                        placeholder="1-100"
+                                    />
+                                    <span className="text-yellow-500 text-sm ml-1">x</span>
+                                </div>
+                            )}
+                            {showLeverageDropdown && !isEditingLeverage && (
                                 <div className="dropdown-menu absolute top-full left-0 right-0 mt-1 bg-[#2b2b32] rounded-md border border-white/20 overflow-hidden z-[60] shadow-xl max-h-48 overflow-y-auto">
                                     {leverageOptions.map((lev) => (
                                         <div
@@ -585,7 +936,7 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
                     <div className="space-y-3">
                         <div className="bg-[#2b2b32] rounded-lg p-1 flex items-center border border-transparent focus-within:border-yellow-500/50 transition-colors">
                             <div className="flex-1 px-3 py-1">
-                                <label className="text-xs text-gray-500 block">Value (per side)</label>
+                                <label className="text-xs text-gray-500 block">Investment (Margin) per side - Pos Size = ${leverage > 1 ? `Inv × ${leverage}` : 'Inv'}</label>
                                 <input
                                     type="number"
                                     value={amount}
@@ -600,14 +951,25 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
                             </div>
                         </div>
 
+                        {/* Quick Margin Preview */}
+                        {amount && Number(amount) > 0 && leverage > 1 && (
+                            <div className="bg-blue-500/10 border border-blue-500/20 rounded px-2 py-1 text-[10px]">
+                                <span className="text-gray-400">💡 With {leverage}x leverage: Your </span>
+                                <span className="text-green-400 font-bold">${Number(amount).toFixed(2)}</span>
+                                <span className="text-gray-400"> investment controls </span>
+                                <span className="text-yellow-400 font-bold">${(Number(amount) * leverage).toFixed(2)}</span>
+                                <span className="text-gray-400"> position per side</span>
+                            </div>
+                        )}
+
                         {/* Quantity Preview */}
                         {amount && Number(amount) > 0 && (
                             <div className="flex justify-between text-[10px] text-gray-500 font-mono px-2">
                                 <span>
-                                    Bybit: <span className="text-yellow-500 font-bold">≈ {(Number(amount) / (markPrice || 1)).toFixed(3)} {symbol}</span>
+                                    Bybit: <span className="text-yellow-500 font-bold">≈ {((Number(amount) * leverage) / (markPrice || 1)).toFixed(3)} {symbol}</span>
                                 </span>
                                 <span>
-                                    Binance: <span className="text-yellow-500 font-bold">≈ {(Number(amount) / (markPrice || 1)).toFixed(3)} {symbol}</span>
+                                    Binance: <span className="text-yellow-500 font-bold">≈ {((Number(amount) * leverage) / (markPrice || 1)).toFixed(3)} {symbol}</span>
                                 </span>
                             </div>
                         )}
@@ -659,8 +1021,12 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
                                 onClick={() => handleExecuteClick("Both", "Both")}
                                 disabled={loading || !amount || isTradeLocked}
                             >
-                                <ArrowRightLeft className="w-5 h-5 mr-2" />
-                                {isTradeLocked ? "Trade Locked (0% Rate)" : "Execute Arbitrage Trade"}
+                                {loading ? (
+                                    <Loader2 className="w-5 h-5 mr-2 animate-spin" />
+                                ) : (
+                                    <ArrowRightLeft className="w-5 h-5 mr-2" />
+                                )}
+                                {loading ? "Executing..." : isTradeLocked ? "Trade Locked (0% Rate)" : "Execute Arbitrage Trade"}
                             </Button>
 
                             {/* Scheduled Trade Button */}
@@ -674,11 +1040,11 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
                                 onClick={() => handleExecuteClick("Schedule", "Both")}
                                 disabled={loading || !amount || isTradeLocked}
                             >
-                                <Zap className="w-4 h-4 mr-2" />
+                                {loading ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Zap className="w-4 h-4 mr-2" />}
                                 Auto Trade (Next Minute)
                             </Button>
 
-                            {/* Individual Trades */}
+                            {/* Individual Trades with Exchange Logos */}
                             <div className="grid grid-cols-2 gap-2">
                                 <Button
                                     className={cn(
@@ -688,8 +1054,13 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
                                     onClick={() => handleExecuteClick("Long", recommendation.longPlatform)}
                                     disabled={loading || isTradeLocked}
                                 >
+                                    <img
+                                        src={recommendation.longPlatform === "Binance" ? EXCHANGE_LOGOS.binance : EXCHANGE_LOGOS.bybit}
+                                        className="w-4 h-4 rounded-full mr-1"
+                                        alt={recommendation.longPlatform}
+                                    />
                                     <TrendingUp className="w-4 h-4 mr-1" />
-                                    Long {recommendation.longPlatform}
+                                    Long
                                 </Button>
                                 <Button
                                     className={cn(
@@ -699,8 +1070,13 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
                                     onClick={() => handleExecuteClick("Short", recommendation.shortPlatform)}
                                     disabled={loading || isTradeLocked}
                                 >
+                                    <img
+                                        src={recommendation.shortPlatform === "Binance" ? EXCHANGE_LOGOS.binance : EXCHANGE_LOGOS.bybit}
+                                        className="w-4 h-4 rounded-full mr-1"
+                                        alt={recommendation.shortPlatform}
+                                    />
                                     <TrendingDown className="w-4 h-4 mr-1" />
-                                    Short {recommendation.shortPlatform}
+                                    Short
                                 </Button>
                             </div>
                         </div>
@@ -718,14 +1094,17 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
                             </span>
                         </div>
 
-                        {/* Positions Display */}
+                        {/* Positions Display with Exchange Logos */}
                         <div className="space-y-2">
                             {positions.bybit ? (
                                 <div className="bg-[#2b2b32] p-2 rounded border border-white/10 flex justify-between items-center text-xs">
-                                    <div>
-                                        <div className="font-bold text-white">Bybit</div>
-                                        <div className={cn("font-bold", positions.bybit.side === "Buy" ? "text-green-500" : "text-red-500")}>
-                                            {positions.bybit.side.toUpperCase()} {positions.bybit.size}
+                                    <div className="flex items-center gap-2">
+                                        <img src={EXCHANGE_LOGOS.bybit} className="w-4 h-4 rounded-full" alt="Bybit" />
+                                        <div>
+                                            <div className="font-bold text-white">Bybit</div>
+                                            <div className={cn("font-bold", positions.bybit.side === "Buy" ? "text-green-500" : "text-red-500")}>
+                                                {positions.bybit.side.toUpperCase()} {positions.bybit.size}
+                                            </div>
                                         </div>
                                     </div>
                                     <div className={cn("font-mono", positions.bybit.pnl >= 0 ? "text-green-500" : "text-red-500")}>
@@ -736,10 +1115,13 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
 
                             {positions.binance ? (
                                 <div className="bg-[#2b2b32] p-2 rounded border border-white/10 flex justify-between items-center text-xs">
-                                    <div>
-                                        <div className="font-bold text-white">Binance</div>
-                                        <div className={cn("font-bold", positions.binance.side === "Buy" ? "text-green-500" : "text-red-500")}>
-                                            {positions.binance.side.toUpperCase()} {positions.binance.size}
+                                    <div className="flex items-center gap-2">
+                                        <img src={EXCHANGE_LOGOS.binance} className="w-4 h-4 rounded-full" alt="Binance" />
+                                        <div>
+                                            <div className="font-bold text-white">Binance</div>
+                                            <div className={cn("font-bold", positions.binance.side === "Buy" ? "text-green-500" : "text-red-500")}>
+                                                {positions.binance.side.toUpperCase()} {positions.binance.size}
+                                            </div>
                                         </div>
                                     </div>
                                     <div className={cn("font-mono", positions.binance.pnl >= 0 ? "text-green-500" : "text-red-500")}>
@@ -749,40 +1131,19 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
                             ) : <div className="text-xs text-gray-600 text-center py-1">No Binance Position</div>}
                         </div>
 
-                        {/* Close Button with 2-Step Confirmation */}
+                        {/* Close Button - Opens Dialog */}
                         {(positions.bybit || positions.binance) && (
                             <Button
                                 variant="destructive"
                                 className="w-full font-bold h-9 text-xs"
-                                onClick={() => setCloseStep(s => s === 0 ? 1 : s === 1 ? 2 : 0)}
+                                onClick={() => setShowCloseDialog(true)}
+                                disabled={closingPositions}
                             >
-                                {closeStep === 0 && "Close Position"}
-                                {closeStep === 1 && "Confirm Close?"}
-                                {closeStep === 2 && "Tap to FINAL CLOSE"}
-                            </Button>
-                        )}
-                        {closeStep === 2 && (
-                            <Button
-                                variant="destructive"
-                                className="w-full font-bold h-9 text-xs animate-pulse bg-red-600 mt-1"
-                                onClick={async () => {
-                                    const backendUrl = localStorage.getItem("primary_backend_url") || "https://vats147-bianance-bot.hf.space";
-                                    try {
-                                        await fetch(`${backendUrl}/api/close-all-positions`, {
-                                            method: "POST", headers: {
-                                                "X-User-Bybit-Key": localStorage.getItem("user_bybit_key"),
-                                                "X-User-Bybit-Secret": localStorage.getItem("user_bybit_secret"),
-                                                "X-User-Binance-Key": localStorage.getItem("user_binance_key"),
-                                                "X-User-Binance-Secret": localStorage.getItem("user_binance_secret")
-                                            }
-                                        });
-                                        toast.success("Close command sent!");
-                                        setCloseStep(0);
-                                        fetchPositions();
-                                    } catch (e) { toast.error("Close failed"); }
-                                }}
-                            >
-                                EXECUTE CLOSE NOW
+                                {closingPositions ? (
+                                    <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Closing...</>
+                                ) : (
+                                    "Close All Positions"
+                                )}
                             </Button>
                         )}
 
@@ -840,13 +1201,108 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
                         </div>
                         <div className="flex justify-between items-center pt-2">
                             <span className="text-gray-400">Est. Qty (Per Side)</span>
-                            <span className="font-mono text-sm">{(Number(amount) / (markPrice || 1)).toFixed(3)} {symbol}</span>
+                            <span className="font-mono text-sm">{((Number(amount) * leverage) / (markPrice || 1)).toFixed(3)} {symbol}</span>
                         </div>
                     </div>
                     <DialogFooter className="gap-2 sm:gap-0">
                         <Button variant="ghost" onClick={() => setShowConfirmModal(false)}>Cancel</Button>
                         <Button className="bg-green-600 hover:bg-green-700" onClick={confirmAndExecute}>
                             Confirm & Execute
+                        </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
+
+            {/* Close All Positions Confirmation Dialog */}
+            <Dialog open={showCloseDialog} onOpenChange={setShowCloseDialog}>
+                <DialogContent className="bg-[#1e1e24] text-white border-white/10">
+                    <DialogHeader>
+                        <DialogTitle className="flex items-center gap-2 text-red-400">
+                            <AlertTriangle className="w-5 h-5" />
+                            Close All Positions
+                        </DialogTitle>
+                        <DialogDescription className="text-gray-400">
+                            This will close all your open positions on both Binance and Bybit. This action cannot be undone.
+                        </DialogDescription>
+                    </DialogHeader>
+                    <div className="space-y-3 py-4">
+                        {positions.bybit && (
+                            <div className="flex items-center justify-between bg-[#2b2b32] rounded p-3">
+                                <div className="flex items-center gap-2">
+                                    <img src={EXCHANGE_LOGOS.bybit} className="w-5 h-5 rounded-full" alt="Bybit" />
+                                    <span className="font-bold">Bybit</span>
+                                </div>
+                                <div>
+                                    <span className={cn("font-bold mr-2", positions.bybit.side === "Buy" ? "text-green-500" : "text-red-500")}>
+                                        {positions.bybit.side.toUpperCase()}
+                                    </span>
+                                    <span className="font-mono">{positions.bybit.size}</span>
+                                </div>
+                                <div className={cn("font-mono font-bold", positions.bybit.pnl >= 0 ? "text-green-500" : "text-red-500")}>
+                                    {positions.bybit.pnl >= 0 ? "+" : ""}{positions.bybit.pnl.toFixed(2)} USDT
+                                </div>
+                            </div>
+                        )}
+                        {positions.binance && (
+                            <div className="flex items-center justify-between bg-[#2b2b32] rounded p-3">
+                                <div className="flex items-center gap-2">
+                                    <img src={EXCHANGE_LOGOS.binance} className="w-5 h-5 rounded-full" alt="Binance" />
+                                    <span className="font-bold">Binance</span>
+                                </div>
+                                <div>
+                                    <span className={cn("font-bold mr-2", positions.binance.side === "Buy" ? "text-green-500" : "text-red-500")}>
+                                        {positions.binance.side.toUpperCase()}
+                                    </span>
+                                    <span className="font-mono">{positions.binance.size}</span>
+                                </div>
+                                <div className={cn("font-mono font-bold", positions.binance.pnl >= 0 ? "text-green-500" : "text-red-500")}>
+                                    {positions.binance.pnl >= 0 ? "+" : ""}{positions.binance.pnl.toFixed(2)} USDT
+                                </div>
+                            </div>
+                        )}
+                        <div className="bg-yellow-500/10 border border-yellow-500/30 rounded p-3 text-xs text-yellow-400">
+                            <strong>⚠️ Warning:</strong> Closing positions at market price may result in slippage.
+                            Make sure you understand the current market conditions before proceeding.
+                        </div>
+                    </div>
+                    <DialogFooter className="gap-2 sm:gap-0">
+                        <Button variant="ghost" onClick={() => setShowCloseDialog(false)}>
+                            Cancel
+                        </Button>
+                        <Button
+                            variant="destructive"
+                            className="bg-red-600 hover:bg-red-700"
+                            disabled={closingPositions}
+                            onClick={async () => {
+                                setClosingPositions(true);
+                                const backendUrl = localStorage.getItem("primary_backend_url") || "https://vats147-bianance-bot.hf.space";
+                                try {
+                                    await fetch(`${backendUrl}/api/close-all-positions`, {
+                                        method: "POST",
+                                        headers: {
+                                            "X-User-Bybit-Key": localStorage.getItem("user_bybit_key"),
+                                            "X-User-Bybit-Secret": localStorage.getItem("user_bybit_secret"),
+                                            "X-User-Binance-Key": localStorage.getItem("user_binance_key"),
+                                            "X-User-Binance-Secret": localStorage.getItem("user_binance_secret")
+                                        }
+                                    });
+                                    toast.success("All positions closed successfully!");
+                                    setShowCloseDialog(false);
+                                    addLog("All positions closed", "success");
+                                    fetchPositions();
+                                } catch (e) {
+                                    toast.error("Failed to close positions");
+                                    addLog("Failed to close positions", "error");
+                                } finally {
+                                    setClosingPositions(false);
+                                }
+                            }}
+                        >
+                            {closingPositions ? (
+                                <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Closing...</>
+                            ) : (
+                                "Confirm Close All"
+                            )}
                         </Button>
                     </DialogFooter>
                 </DialogContent>
