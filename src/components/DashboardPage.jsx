@@ -14,6 +14,7 @@ export function DashboardPage() {
     const [error, setError] = useState(null);
     const [activeBackend, setActiveBackend] = useState("primary");
     const [activeTab, setActiveTab] = useState("bybit");
+    const [isLiveBybit, setIsLiveBybit] = useState(() => localStorage.getItem("user_bybit_live") === "true");
     const toast = useToast();
 
     const getBackendUrl = () => {
@@ -45,11 +46,14 @@ export function DashboardPage() {
         const headers = getAuthHeaders(exchange);
         const options = { headers };
 
-        // Append query param for testnet if binance
+        // Append query param for testnet if binance or live if bybit
         let urlSuffix = "";
         if (exchange === 'binance') {
             const isTestnet = localStorage.getItem("user_binance_testnet") !== "false";
             urlSuffix = `?is_testnet=${isTestnet}`;
+        } else if (exchange === 'bybit') {
+            // Use the isLiveBybit state for toggling
+            urlSuffix = `?is_live=${isLiveBybit}`;
         }
 
         try {
@@ -137,7 +141,13 @@ export function DashboardPage() {
 
     useEffect(() => {
         fetchData();
-    }, []);
+    }, [isLiveBybit]); // Re-fetch when live mode changes
+
+    const toggleBybitLiveMode = () => {
+        const newValue = !isLiveBybit;
+        setIsLiveBybit(newValue);
+        localStorage.setItem("user_bybit_live", newValue.toString());
+    };
 
     const renderBybitContent = () => {
         const bal = balanceData?.bybit;
@@ -284,6 +294,18 @@ export function DashboardPage() {
                     <p className="text-muted-foreground mt-1">
                         Review Balances, P&L, and History across platforms.
                     </p>
+                </div>
+                <div className="flex items-center gap-2">
+                    <span className={`text-sm font-medium ${!isLiveBybit ? 'text-blue-600' : 'text-muted-foreground'}`}>Demo</span>
+                    <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={toggleBybitLiveMode}
+                        className={`w-14 h-7 p-1 rounded-full relative transition-colors ${isLiveBybit ? 'bg-green-500 border-green-500' : 'bg-muted border-muted'}`}
+                    >
+                        <span className={`absolute w-5 h-5 rounded-full bg-white shadow transition-transform ${isLiveBybit ? 'translate-x-6' : 'translate-x-0'}`} />
+                    </Button>
+                    <span className={`text-sm font-medium ${isLiveBybit ? 'text-green-600' : 'text-muted-foreground'}`}>Live</span>
                 </div>
             </div>
 

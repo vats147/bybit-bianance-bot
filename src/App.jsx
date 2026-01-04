@@ -3,6 +3,7 @@ import { ArbitrageModal } from "@/components/ArbitrageModal";
 import { TradeSidePanel } from "./components/TradeSidePanel";
 import { DemoTradingModal } from "./components/DemoTradingModal";
 import { DashboardPage } from "./components/DashboardPage";
+import { AutoTradePage } from "./components/AutoTradePage";
 import { SettingsPage } from "./components/SettingsPage";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Input } from "@/components/ui/input";
@@ -16,10 +17,13 @@ import { cn } from "@/lib/utils";
 
 // --- API Helpers ---
 
-// --- API Helpers ---
-
 const getBackendUrl = () => {
-  const primary = localStorage.getItem("primary_backend_url") || "https://bianance-bot.onrender.com";
+  // Default to localhost for local dev if not set
+  const defaultUrl = (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1")
+    ? "http://localhost:8000"
+    : "https://bianance-bot.onrender.com";
+
+  const primary = localStorage.getItem("primary_backend_url") || defaultUrl;
   const backup = localStorage.getItem("backup_backend_url");
   return { primary, backup };
 };
@@ -101,7 +105,7 @@ const fetchCoinSwitchRates = async () => {
     // https://coinswitch.co/... -> /api/coinswitch/...
     const proxyUrl = COINSWITCH_API_URL.replace('https://coinswitch.co', '/api/coinswitch');
 
-    // Auth headers removed as this is a public endpoint
+    // Auth headers headers removed as this is a public endpoint
     const res = await fetch(proxyUrl);
 
     if (!res.ok) {
@@ -162,6 +166,12 @@ function App() {
   const [lastUpdated, setLastUpdated] = useState(null);
   const [currentTab, setCurrentTab] = useState("scanner"); // 'scanner', 'dashboard', 'settings'
 
+  // --- LIVE MODE STATE ---
+  const [isLive, setIsLive] = useState(() => {
+    // Initialize from LocalStorage
+    return localStorage.getItem("is_live_mode") === "true";
+  });
+
   // Filters
   const [minSpread, setMinSpread] = useState(0); // Default 0% to show all pairs
   const [showHighDiff, setShowHighDiff] = useState(false); // Filter > 0.5% Diff
@@ -179,14 +189,23 @@ function App() {
 
   // Load telegram config and auto-trade symbols from localStorage
   useEffect(() => {
-    // Enforcement: Force reset primary backend URL to Render (ONLY in production)
-    const targetUrl = "https://bianance-bot.onrender.com";
-    const currentPrimary = localStorage.getItem("primary_backend_url");
     const isLocal = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
 
-    if (!isLocal && currentPrimary !== targetUrl) {
-      console.log(`Enforcing backend URL: ${currentPrimary} -> ${targetUrl}`);
-      localStorage.setItem("primary_backend_url", targetUrl);
+    // Enforcement: 
+    // 1. Production -> Render
+    // 2. Local -> localhost:8000 (preferred over 127.0.0.1 for CORS consistency)
+    const targetProdUrl = "https://bianance-bot.onrender.com";
+    const currentPrimary = localStorage.getItem("primary_backend_url");
+
+    if (!isLocal && currentPrimary !== targetProdUrl) {
+      console.log(`Enforcing PROD backend URL: ${currentPrimary} -> ${targetProdUrl}`);
+      localStorage.setItem("primary_backend_url", targetProdUrl);
+    } else if (isLocal) {
+      // If local, ensure we point to localhost:8000 by default if it's currently 127.0.0.1 or empty
+      if (!currentPrimary || currentPrimary.includes("127.0.0.1")) {
+        console.log(`Enforcing LOCAL backend URL: ${currentPrimary} -> http://localhost:8000`);
+        localStorage.setItem("primary_backend_url", "http://localhost:8000");
+      }
     }
 
     const savedToken = localStorage.getItem("telegram_token") || '';
@@ -225,10 +244,23 @@ function App() {
   // detailed map to keep store of latest data
   // symbol -> { binanceRate, bybitRate, ... }
   const dataRef = useRef({});
+  const previousDataRef = useRef({});
   const alertedPairsRef = useRef(new Map()); // symbol -> lastFundingTimeAlerted
 
   const intervalMapRef = useRef({}); // Use Ref to avoid stale closure in setInterval
   const [metadataCount, setMetadataCount] = useState(0);
+
+  // STABILITY: Lock to prevent processing data during mode switch
+  const modeSwitchingRef = useRef(false);
+  // STABILITY: Mode generation counter - increments on each mode switch
+  const modeGenerationRef = useRef(0);
+  // STABILITY: Track which mode generation each data item belongs to
+  const dataGenerationRef = useRef(0);
+
+  // STABILITY: Throttle table updates to prevent rapid flickering
+  const lastTableUpdateRef = useRef(0);
+  const pendingUpdateRef = useRef(null);
+  const TABLE_UPDATE_INTERVAL = 3000; // Update table max every 3 seconds for stability
 
   useEffect(() => {
     // Fetch Interval Metadata with Retry/Polling
@@ -251,188 +283,408 @@ function App() {
     return () => clearInterval(pollId);
   }, []);
 
-  const updateTableData = () => {
-    // Allow rows if we have a symbol key (populated by initial fetch or WS)
-    const merged = Object.values(dataRef.current)
+  // Throttled table update - prevents rapid UI flickering
+  const updateTableData = useCallback((forceUpdate = false) => {
+    const now = Date.now();
+
+    // If not forced and we updated recently, schedule for later
+    if (!forceUpdate && now - lastTableUpdateRef.current < TABLE_UPDATE_INTERVAL) {
+      if (!pendingUpdateRef.current) {
+        pendingUpdateRef.current = setTimeout(() => {
+          pendingUpdateRef.current = null;
+          updateTableData(true);
+        }, TABLE_UPDATE_INTERVAL - (now - lastTableUpdateRef.current));
+      }
+      return;
+    }
+
+    // Clear any pending update
+    if (pendingUpdateRef.current) {
+      clearTimeout(pendingUpdateRef.current);
+      pendingUpdateRef.current = null;
+    }
+
+    lastTableUpdateRef.current = now;
+
+    // STABILITY: Get current generation - only show data from current mode
+    const currentGen = modeGenerationRef.current;
+
+    // Convert to array - filter by generation to avoid stale data
+    const rows = Object.values(dataRef.current)
+      .filter(item => item._generation === currentGen) // Only current generation
       .map(item => {
-        let spread = 0;
-        let diff = 0;
-        let apr = 0;
-        const binanceRateVal = item.binanceRate !== undefined ? item.binanceRate : 0;
-        const bybitRateVal = item.bybitRate !== undefined ? item.bybitRate : 0;
+        const bRate = item.binanceRate !== undefined ? item.binanceRate : -999;
+        const cRate = item.bybitRate !== undefined ? item.bybitRate : -999;
         const markPrice = item.markPrice || 0;
-        const nextFundingTime = item.nextFundingTime || 0;
 
-        const binanceRatePct = binanceRateVal * 100;
-        const bybitRatePct = bybitRateVal * 100; // Treat as decimal like Binance
-
-        // Only calculate spread if we have both
-        if (item.binanceRate !== undefined && item.bybitRate !== undefined) {
-          spread = Math.abs(binanceRatePct - bybitRatePct);
-          diff = binanceRatePct - bybitRatePct;
-
-          // Interval Lookup via Ref (fallback)
-          const intervals = intervalMapRef.current[item.symbol] || {};
-          const bybitInt = item.fundingIntervalHours || intervals.bybit || 8;
-          const binanceInt = intervals.binance || 8;
-
-          // Use the higher frequency (smaller interval) for APR projection
-          // This is a conservative estimate of the opportunities per day
-          const freqPerDay = 24 / Math.min(bybitInt, binanceInt);
-          apr = spread * freqPerDay * 365;
+        const bPrice = item.binancePrice || 0;
+        const cPrice = item.bybitPrice || 0;
+        let priceSpread = 0;
+        if (bPrice > 0 && cPrice > 0) {
+          priceSpread = Math.abs(bPrice - cPrice) / bPrice * 100;
         }
 
-        // Already calculated above in apr block, but for the return structure:
-        const intervals = intervalMapRef.current[item.symbol] || {};
-        const bybitInt = item.fundingIntervalHours || intervals.bybit || null;
-        const binanceInt = intervals.binance || null; // Binance currently only in metadata
+        // Calculate Diff/Spread and APR
+        let diff = -999;
+        let spread = 0;
+        let apr = 0;
+        let diffAbs = 0;
 
-        return {
-          ...item,
-          nextFundingTime,
-          spread,
-          diff: diff || 0,
-          apr,
-          markPrice,
-          binanceRate: binanceRateVal * 100,
-          bybitRate: bybitRateVal * 100,
-          binanceRateRaw: binanceRateVal,
-          bybitRateRaw: bybitRateVal,
-          intervals: { bybit: bybitInt, binance: binanceInt }
-        };
-      })
-      // Filter out incomplete rows ONLY if user wants strict mode (optional), 
-      // but for now let's just filter out completely empty ones
-      .filter(item => item.symbol);
+        if (bRate !== -999 && cRate !== -999) {
+          diff = bRate - cRate;
+          spread = Math.abs(diff);
+          diffAbs = Math.abs(diff);
 
-    // Limit to top 200 symbols to avoid memory issues
-    const topSymbols = merged
-      .sort((a, b) => Math.abs(b.spread) - Math.abs(a.spread))
-      .slice(0, 200);
+          // APR Calculation
+          const bnInt = item.binanceInterval || 8;
+          const bbInt = item.bybitInterval || 8;
+          const interval = Math.min(bnInt, bbInt);
+          const opportunitiesPerDay = 24 / interval;
+          apr = (spread * opportunitiesPerDay * 365) * 100;
+        }
 
-    setData(topSymbols);
+        // Clean up expire deltas (visual indicators last 3s)
+        if (item.bnDeltaTime && (now - item.bnDeltaTime > 3000)) item.bnDelta = null;
+        if (item.bbDeltaTime && (now - item.bbDeltaTime > 3000)) item.bbDelta = null;
+
+        return { ...item, diff, spread, diffAbs, apr, binanceRate: bRate, bybitRate: cRate, markPrice, priceSpread, binancePrice: bPrice, bybitPrice: cPrice };
+      });
+
+    // Sort by current config
+    rows.sort((a, b) => {
+      let valA = a[sortConfig.key];
+      let valB = b[sortConfig.key];
+
+      if (valA === undefined) valA = -Infinity;
+      if (valB === undefined) valB = -Infinity;
+
+      if (sortConfig.direction === 'asc') return valA - valB;
+      return valB - valA;
+    });
+
     setLastUpdated(new Date());
-    // Only send alerts if we have meaningful data
-    if (topSymbols.length > 0 && topSymbols[0].spread > 0.01) {
-      checkAndSendAlerts(topSymbols);
+    setData(rows);
+  }, [sortConfig]);
+
+  // --- REUSABLE DATA PROCESSOR (Used by both WS and Polling) ---
+  const getFundingDelta = (symbol, exchange, newRate) => {
+    if (!previousDataRef.current[symbol]) return null;
+    const oldRate = exchange === 'binance' ? previousDataRef.current[symbol].binanceRate : previousDataRef.current[symbol].bybitRate;
+    if (oldRate === undefined || newRate === undefined) return null;
+    if (oldRate !== newRate) {
+      return newRate > oldRate ? 'up' : 'down';
     }
+    return null;
   };
-  // ... keep existing useEffects ...
+
+  const processRatesData = (binance, bybit) => {
+    // STABILITY: Don't process data while switching modes
+    if (modeSwitchingRef.current) {
+      console.log("⏳ Mode switching in progress, ignoring data update");
+      return;
+    }
+
+    // STABILITY: Check if data generation matches current mode generation
+    // This prevents stale data from previous mode from being displayed
+    const currentGen = modeGenerationRef.current;
+
+    // console.log("DEBUG: processRatesData running. getFundingDelta type:", typeof getFundingDelta); 
+    const b = binance || {};
+    const c = bybit || {};
+
+    Object.keys(b).forEach(s => {
+      // Initialize if missing
+      if (!dataRef.current[s]) dataRef.current[s] = { symbol: s };
+
+      // Tag with current generation
+      dataRef.current[s]._generation = currentGen;
+
+      const prev = dataRef.current[s];
+
+      // Calculate Deltas BEFORE updating
+      const bnDelta = getFundingDelta(s, 'binance', b[s].rate);
+
+      // Update Data
+      dataRef.current[s].binanceRate = b[s].rate;
+      dataRef.current[s].binancePrice = b[s].markPrice;
+      dataRef.current[s].markPrice = b[s].markPrice;
+      dataRef.current[s].nextFundingTime = b[s].nextFundingTime;
+      if (b[s].fundingIntervalHours) {
+        dataRef.current[s].binanceInterval = b[s].fundingIntervalHours;
+      }
+
+      // Store Transient Flash State (expires on re-render or timeout in real app, 
+      // but here we rely on frequent updates to clear it naturally or we can use a timestamp)
+      if (bnDelta) {
+        dataRef.current[s].bnDelta = bnDelta;
+        dataRef.current[s].bnDeltaTime = Date.now();
+      }
+    });
+
+    Object.keys(c).forEach(s => {
+      if (!dataRef.current[s]) dataRef.current[s] = { symbol: s };
+
+      // Tag with current generation
+      dataRef.current[s]._generation = currentGen;
+
+      const prev = dataRef.current[s];
+      const bbDelta = getFundingDelta(s, 'bybit', c[s].rate);
+
+      dataRef.current[s].bybitRate = c[s].rate;
+      dataRef.current[s].bybitPrice = c[s].markPrice;
+
+      if (c[s].markPrice && !dataRef.current[s].markPrice) {
+        dataRef.current[s].markPrice = c[s].markPrice;
+      }
+
+      // Sync Next Funding Time
+      const bnNFT = dataRef.current[s].nextFundingTime || Infinity;
+      const bbNFT = c[s].nextFundingTime || Infinity;
+
+      if (bbNFT < bnNFT && bbNFT !== Infinity) {
+        dataRef.current[s].nextFundingTime = bbNFT;
+      } else if (bnNFT !== Infinity) {
+        dataRef.current[s].nextFundingTime = bnNFT;
+      }
+
+      if (c[s].fundingIntervalHours) {
+        dataRef.current[s].bybitInterval = c[s].fundingIntervalHours;
+      }
+
+      if (bbDelta) {
+        dataRef.current[s].bbDelta = bbDelta;
+        dataRef.current[s].bbDeltaTime = Date.now();
+      }
+    });
+
+    // Update Previous Ref for next comparison (deep copy minimal needed)
+    // We only need rates for comparison
+    const snapshot = {};
+    Object.keys(dataRef.current).forEach(s => {
+      snapshot[s] = {
+        binanceRate: dataRef.current[s].binanceRate,
+        bybitRate: dataRef.current[s].bybitRate
+      };
+    });
+    previousDataRef.current = snapshot;
+
+    setLoading(false);
+    updateTableData();
+  };
+
+  // --- FRONTEND WEBSOCKET LOGIC ---
+  const [usingFallback, setUsingFallback] = useState(true); // Default to True until WS connects
+  const wsRef = useRef(null);
+  const isLiveRef = useRef(isLive); // Track current mode for WS handler
+
+  // Keep isLiveRef in sync
+  useEffect(() => {
+    isLiveRef.current = isLive;
+  }, [isLive]);
 
   useEffect(() => {
-    // Throttled UI updater - reduced from 1s to 3s for performance
-    const interval = setInterval(updateTableData, 3000);
-    return () => clearInterval(interval);
-  }, []);
+    const { primary } = getBackendUrl();
+    // Determine WS protocol
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    // Remove trailing slash if present
+    const baseUrl = primary.replace(/\/$/, "");
 
-  // --- WebSocket Logic with Cleanup Safety ---
-  const [isLive, setIsLive] = useState(false); // Default OFF
+    // FORCE HARDCODED URL PATH to avoid environment leakage
+    // We construct it explicitly
+    const wsUrl = baseUrl.replace('http', 'ws').replace('https', 'wss') + "/ws/clients";
+
+    console.log(`Connecting to Backend WS: ${wsUrl} (Mode: ${isLive ? 'LIVE' : 'TEST'})`);
+
+    let reconnectTimeout = null;
+    let pingInterval = null;
+
+    // Close existing connection if any
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+
+    const connect = () => {
+      // Prevent multiple connections
+      if (wsRef.current && (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING)) {
+        return;
+      }
+
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        console.log(`✅ LIVE STREAM CONNECTED (Mode: ${isLive ? 'LIVE' : 'TEST'})`);
+        setUsingFallback(false);
+
+        // 1. Send INIT message to identify mode (Resubscribe equivalent)
+        ws.send(JSON.stringify({ op: "init", is_live: isLive }));
+
+        // 2. Start Heartbeat (Every 5s)
+        if (pingInterval) clearInterval(pingInterval);
+        pingInterval = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ op: "ping" }));
+          }
+        }, 5000);
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          // STABILITY: Skip if mode switching is in progress 
+          // (Not strictly needed with Dual Stream but keeps UI cleaner during reset)
+          // if (modeSwitchingRef.current) return;
+
+          const payload = JSON.parse(event.data);
+
+          // Handle PONG
+          if (payload.op === 'pong') {
+            return;
+          }
+
+          // DUAL STREAM: Payload contains both live and testnet
+          // We simply pick the one matching our local state
+          const currentIsLive = isLiveRef.current;
+
+          let targetData = null;
+          if (currentIsLive) {
+            targetData = payload.live;
+          } else {
+            targetData = payload.testnet;
+          }
+
+          if (targetData && targetData.binance && targetData.bybit) {
+            processRatesData(targetData.binance, targetData.bybit);
+          }
+        } catch (e) {
+          console.error("WS Parse Error", e);
+        }
+      };
+
+      ws.onerror = (error) => {
+        console.log("WS Error", error);
+        setUsingFallback(true);
+      };
+
+      ws.onclose = () => {
+        console.log("❌ LIVE STREAM DISCONNECTED - Switching to Polling");
+        setUsingFallback(true);
+        if (pingInterval) clearInterval(pingInterval);
+
+        // Reconnect after 3s only if this ws is still current
+        reconnectTimeout = setTimeout(() => {
+          if (wsRef.current === ws) {
+            connect();
+          }
+        }, 3000);
+      };
+    };
+
+    connect();
+
+    return () => {
+      if (pingInterval) clearInterval(pingInterval);
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+      if (reconnectTimeout) clearTimeout(reconnectTimeout);
+    };
+  }, [isLive]); // Reconnect when mode changes
+
+  // --- LIVE MODE STATE ---
+  // State moved to top
+
 
   useEffect(() => {
-    // We now rely on Backend WebSocket (starting/stopping via manageWS)
-    // for both Binance and Bybit to ensure stability and alerts.
-    // Direct frontend WS is disabled to save browser resources.
+    // Persist to LocalStorage whenever it changes
+    localStorage.setItem("is_live_mode", isLive);
     return () => {
       setConnectionStatus({ binance: 'disconnected', coinswitch: 'disconnected' });
     };
   }, [isLive]);
 
-
-
-  // Toast on Live Mode Change & Trigger WebSocket
+  // --- BACKEND WS MANAGER (Switch Mode) ---
+  // --- BACKEND WS MANAGER (Switch Mode) ---
   useEffect(() => {
-    // RESET STALE DATA: Clear the data cache when switching modes
+    // With Dual-Stream backend, we no longer need to "switch" the backend mode.
+    // The backend sends both streams. We just need to clear our local data to avoid visual confusion.
+
+    // INCREMENT GENERATION: New mode = new generation
+    modeGenerationRef.current += 1;
+    const thisGeneration = modeGenerationRef.current;
+
+    // RESET STALE DATA
+    setLoading(true);
     dataRef.current = {};
+    previousDataRef.current = {};
+    alertedPairsRef.current.clear();
     setData([]);
-    console.log("🔄 Mode switched: Resetting symbol data cache.");
+    console.log(`🔄 Mode switched to ${isLive ? 'LIVE' : 'TEST'}: Resetting local cache.`);
 
-    const mode = isLive ? "LIVE" : "TESTNET";
-    const { primary } = getBackendUrl();
-
-    // Start/Stop WebSocket based on mode
-    const manageWS = async () => {
+    // Wait a brief moment for next WS frame to populate data
+    // or fetch via REST immediately to be snappy
+    const updateUI = async () => {
       try {
-        const fetchMode = isLive ? "true" : "false";
-        await fetch(`${primary}/api/ws/start?is_live=${fetchMode}`, { method: "POST" });
+        const { binance, bybit } = await fetchRatesWithFailover(isLive);
+        // Check generation before applying
+        if (modeGenerationRef.current === thisGeneration) {
+          processRatesData(binance, bybit);
+        }
+      } catch (e) { console.error(e); }
+    };
 
-        // Polling loop to update connection UI from backend status
-        const updateStatus = async () => {
-          try {
-            const statusRes = await fetch(`${primary}/api/ws/status`);
-            const status = await statusRes.json();
+    updateUI();
 
-            // New structure: { binance: { running, symbols_count }, bybit: { running, symbols_count } }
-            setConnectionStatus({
-              binance: status.binance?.symbols_count > 0 ? 'connected' : 'disconnected',
-              coinswitch: status.bybit?.symbols_count > 0 ? 'connected' : 'disconnected'
-            });
+    // Ensure backend WS is running (idempotent call)
+    const { primary } = getBackendUrl();
+    fetch(`${primary}/api/ws/start?is_live=${isLive}`).catch(e => console.error("WS Start ping failed", e));
 
-            if (status.binance?.symbols_count > 0 || status.bybit?.symbols_count > 0) {
-              console.log(`📡 WS Active: BN(${status.binance?.symbols_count}) BB(${status.bybit?.symbols_count})`);
-            }
-          } catch (e) { console.error("Status check failed", e); }
-        };
+    // Status Polling for UI Indicators
+    const updateUiStatus = async () => {
+      try {
+        const statusRes = await fetch(`${primary}/api/ws/status`);
+        const status = await statusRes.json();
 
-        updateStatus();
-        const statusPoll = setInterval(updateStatus, 10000);
-        return () => clearInterval(statusPoll);
+        // Map backend status to frontend state
+        // If live -> check binance_live, else binance_testnet
+        const targetBinance = isLive ? status.binance_live : status.binance_testnet;
 
+        setConnectionStatus({
+          binance: targetBinance?.running ? 'connected' : 'disconnected',
+          coinswitch: status.bybit?.running ? 'connected' : 'disconnected'
+        });
       } catch (e) {
-        toast.error(`Mode switch error: ${e.message}`);
+        setConnectionStatus({ binance: 'disconnected', coinswitch: 'disconnected' });
       }
     };
 
-    const cleanup = manageWS();
-    return () => { if (typeof cleanup === 'function') cleanup(); };
+    updateUiStatus();
+    const statusInterval = setInterval(updateUiStatus, 5000);
+
+    return () => clearInterval(statusInterval);
   }, [isLive]);
 
-  // Fetch initial snapshot & Polling Backup
+  // --- DATA FETCHING (INITIAL + POLLING FALLBACK) ---
   useEffect(() => {
     const fetchData = async () => {
-      // Don't show global loading spinner on background refreshes
-      // setLoading(true); 
       try {
-        const { binance, bybit } = await fetchRatesWithFailover(isLive);
+        // STABILITY: Skip if mode switching is in progress
+        if (modeSwitchingRef.current) {
+          return;
+        }
 
-        const b = binance || {};
-        const c = bybit || {};
+        // Use ref to get current mode (avoids stale closure)
+        const currentIsLive = isLiveRef.current;
+        const { binance, bybit } = await fetchRatesWithFailover(currentIsLive);
 
-        Object.keys(b).forEach(s => {
-          if (!dataRef.current[s]) dataRef.current[s] = { symbol: s };
-          dataRef.current[s].binanceRate = b[s].rate;
-          dataRef.current[s].markPrice = b[s].markPrice;
-          dataRef.current[s].nextFundingTime = b[s].nextFundingTime;
-        });
-        Object.keys(c).forEach(s => {
-          if (!dataRef.current[s]) dataRef.current[s] = { symbol: s };
+        // Double-check mode hasn't changed during fetch OR mode switch started
+        if (isLiveRef.current !== currentIsLive || modeSwitchingRef.current) {
+          console.log("Mode changed during fetch, discarding stale data");
+          return;
+        }
 
-          // Store both rates
-          dataRef.current[s].bybitRate = c[s].rate;
-
-          // If Binance didn't have a markprice but bybit does, use it
-          if (c[s].markPrice && !dataRef.current[s].markPrice) {
-            dataRef.current[s].markPrice = c[s].markPrice;
-          }
-
-          // Prefer Bybit funding time if Binance is missing or Bybit is more recent (earlier)
-          const bnNFT = dataRef.current[s].nextFundingTime || Infinity;
-          const bbNFT = c[s].nextFundingTime || Infinity;
-
-          if (bbNFT < bnNFT && bbNFT !== Infinity) {
-            dataRef.current[s].nextFundingTime = bbNFT;
-          } else if (bnNFT !== Infinity) {
-            dataRef.current[s].nextFundingTime = bnNFT;
-          }
-
-          if (c[s].fundingIntervalHours) {
-            dataRef.current[s].fundingIntervalHours = c[s].fundingIntervalHours;
-          }
-        });
-
-        // If this was the first load, turn off loading
-        setLoading(false);
-        // Trigger table update immediately after fetch
-        updateTableData();
+        processRatesData(binance, bybit);
 
         // --- TELEGRAM ALERT MONITORING ---
         const threshold = parseFloat(localStorage.getItem("alert_threshold") || "0.5");
@@ -445,7 +697,7 @@ function App() {
           Object.keys(dataRef.current).forEach(symbol => {
             const item = dataRef.current[symbol];
             if (item.binanceRate !== undefined && item.bybitRate !== undefined && item.nextFundingTime) {
-              const diff = Math.abs(item.binanceRate - item.bybitRate); // Both are already in % (e.g. 0.01)
+              const diff = Math.abs(item.binanceRate - item.bybitRate);
               const timeToFunding = item.nextFundingTime - Date.now();
 
               if (diff >= threshold && timeToFunding > 0 && timeToFunding <= leadTimeMs) {
@@ -479,8 +731,16 @@ function App() {
       }
     };
 
-    fetchData(); // Initial run
-    const pollInterval = setInterval(fetchData, 15000); // Poll every 15s (was 10s)
+    // Initial Fetch on Load
+    fetchData();
+
+    // FALLBACK POLLING: Only active if usingFallback is true
+    const pollInterval = setInterval(() => {
+      if (usingFallback) {
+        console.log("⚠️ WS Down. Polling API...");
+        fetchData();
+      }
+    }, 3000); // Poll every 3s if fallback active
 
     // One-time fetch for funding intervals
     const fetchIntervals = async () => {
@@ -489,20 +749,12 @@ function App() {
         const data = await res.json();
         if (data.symbols) {
           data.symbols.forEach(s => {
-            // Binance doesn't always strictly send 'fundingIntervalHours'.
-            // Some endpoints send 'contractType' etc. 
-            // We can check 'fundingInterval' (in ms) if available, or just default to 8.
-            // Usually it is not directly in symbol info for ALL endpoints, but let's try.
-            // If not present, we will default to 8 in the modal.
             if (s.pair) {
-              // Remove USDT
               let sym = s.pair.replace('USDT', '');
               if (!dataRef.current[sym]) dataRef.current[sym] = { symbol: sym };
-
               if (s.fundingIntervalHours) {
                 dataRef.current[sym].fundingIntervalHours = s.fundingIntervalHours;
               } else {
-                // Fallback: Default to 8h
                 dataRef.current[sym].fundingIntervalHours = 8;
               }
             }
@@ -513,9 +765,10 @@ function App() {
     fetchIntervals();
 
     return () => clearInterval(pollInterval);
-  }, [isLive]);
+  }, [isLive, usingFallback]);
 
   const [searchQuery, setSearchQuery] = useState("");
+  const [intervalFilter, setIntervalFilter] = useState("all"); // "all", "1h", "4h", "8h", "matched"
 
   // Testnet Filtering Logic
   const [testnetSymbols, setTestnetSymbols] = useState(new Set());
@@ -561,41 +814,80 @@ function App() {
   }, [currentTab]);
 
 
-  // Sorting Logic
+  // Sorting Logic - with stability optimization
   const sortedData = useMemo(() => {
     let sortableItems = [...data];
     if (sortConfig.key) {
       sortableItems.sort((a, b) => {
-        if (a[sortConfig.key] < b[sortConfig.key]) {
+        let valA = a[sortConfig.key];
+        let valB = b[sortConfig.key];
+
+        // Handle undefined/null values
+        if (valA === undefined || valA === null) valA = -Infinity;
+        if (valB === undefined || valB === null) valB = -Infinity;
+
+        // For diff-based columns, use absolute values
+        if (sortConfig.key === 'diffAbs' || sortConfig.key === 'spread') {
+          valA = Math.abs(valA);
+          valB = Math.abs(valB);
+        }
+
+        if (valA < valB) {
           return sortConfig.direction === 'ascending' ? -1 : 1;
         }
-        if (a[sortConfig.key] > b[sortConfig.key]) {
+        if (valA > valB) {
           return sortConfig.direction === 'ascending' ? 1 : -1;
         }
-        return 0;
+        // STABLE SORT: Use symbol as tiebreaker to prevent jumping
+        return a.symbol.localeCompare(b.symbol);
       });
     }
-    return sortableItems.filter(item => {
+
+    const filtered = sortableItems.filter(item => {
       const matchesSpread = item.spread >= parseFloat(minSpread);
-      const matchesSearch = item.symbol.toLowerCase().includes(searchQuery.toLowerCase());
+
+      // Search matches symbol - if searching, show ALL matching results
+      const matchesSearch = searchQuery.trim() === '' || item.symbol.toLowerCase().includes(searchQuery.toLowerCase());
 
       // High Diff Filter (> 0.5%)
       const matchesHighDiff = showHighDiff ? Math.abs(item.diff) > 0.5 : true;
 
       // Filter by Testnet Availability if Testnet is ON
-      // If we are in testnet mode, and the symbol is NOT in the allowed list, hide it.
-      // But only if we have fetched the list (size > 0).
       let matchesTestnet = true;
       if (isTestnet && testnetSymbols.size > 0) {
         matchesTestnet = testnetSymbols.has(item.symbol);
       }
 
-      return matchesSpread && matchesSearch && matchesTestnet && matchesHighDiff;
-    });
-  }, [data, sortConfig, minSpread, searchQuery, isTestnet, testnetSymbols, showHighDiff]);
+      // Interval Filter
+      let matchesInterval = true;
+      const bnInt = item.binanceInterval || 8;
+      const bbInt = item.bybitInterval || 8;
+      if (intervalFilter === "1h") {
+        matchesInterval = bnInt === 1 && bbInt === 1;
+      } else if (intervalFilter === "4h") {
+        matchesInterval = bnInt === 4 && bbInt === 4;
+      } else if (intervalFilter === "8h") {
+        matchesInterval = bnInt === 8 && bbInt === 8;
+      } else if (intervalFilter === "matched") {
+        matchesInterval = bnInt === bbInt;
+      }
 
-  // Pagination Logic
-  const totalPages = Math.ceil(sortedData.length / itemsPerPage);
+      return matchesSpread && matchesSearch && matchesTestnet && matchesHighDiff && matchesInterval;
+    });
+
+    return filtered;
+  }, [data, sortConfig, minSpread, searchQuery, isTestnet, testnetSymbols, showHighDiff, intervalFilter]);
+
+  // PAGINATION: Standard pagination with all data
+  const totalPages = Math.ceil(sortedData.length / itemsPerPage) || 1;
+
+  // Reset to page 1 if current page is out of bounds
+  useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(1);
+    }
+  }, [totalPages, currentPage]);
+
   const paginatedData = sortedData.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage);
 
   const requestSort = (key) => {
@@ -734,6 +1026,14 @@ function App() {
                 <LayoutDashboard className="h-4 w-4" /> Dashboard
               </Button>
               <Button
+                variant={currentTab === 'auto-trade' ? 'secondary' : 'ghost'}
+                size="sm"
+                onClick={() => setCurrentTab('auto-trade')}
+                className="gap-2"
+              >
+                <Zap className="h-4 w-4" /> Auto-Bet
+              </Button>
+              <Button
                 variant={currentTab === 'settings' ? 'secondary' : 'ghost'}
                 size="sm"
                 onClick={() => setCurrentTab('settings')}
@@ -744,6 +1044,18 @@ function App() {
             </div>
           </div>
         </div>
+
+        {/* --- AUTO TRADE TAB --- */}
+        {currentTab === 'auto-trade' && (
+          <AutoTradePage
+            topOpportunities={[...data]
+              .filter(item => item.spread > 0 && item.binanceRate !== -999 && item.bybitRate !== -999)
+              .sort((a, b) => b.spread - a.spread)
+              .slice(0, 5)
+            }
+            isLive={isLive}
+          />
+        )}
 
         {/* --- SCANNER TAB --- */}
         {currentTab === 'scanner' && (
@@ -767,12 +1079,40 @@ function App() {
                   Last update: {lastUpdated ? lastUpdated.toLocaleTimeString() : '...'}
                 </span>
                 <div className="flex gap-1 mr-2">
-                  <span className={cn("text-[10px] px-1 rounded border", connectionStatus.binance === 'connected' ? "bg-green-500/20 border-green-500 text-green-500" : "bg-red-500/20 border-red-500 text-red-500")}>
-                    BN: {connectionStatus.binance === 'connected' ? 'LIVE' : 'OFF'}
-                  </span>
-                  <span className={cn("text-[10px] px-1 rounded border", connectionStatus.coinswitch === 'connected' ? "bg-green-500/20 border-green-500 text-green-500" : "bg-red-500/20 border-red-500 text-red-500")}>
-                    BB: {connectionStatus.coinswitch === 'connected' ? 'LIVE' : 'OFF'}
-                  </span>
+                  <div className="flex gap-2 mr-2">
+                    <div className="flex items-center gap-1.5 px-2 py-1 bg-background border rounded-md shadow-sm">
+                      {/* Stream Status Badge */}
+                      <span className={cn("text-[10px] uppercase font-black px-1.5 rounded-sm",
+                        !usingFallback ? "bg-blue-500 text-white" : "bg-amber-500 text-white"
+                      )}>
+                        {!usingFallback ? "STREAM" : "POLL"}
+                      </span>
+                    </div>
+
+                    <div className="flex items-center gap-1.5 px-2 py-1 bg-background border rounded-md shadow-sm">
+                      <span className="text-[10px] font-bold text-muted-foreground">BN</span>
+                      <div className="relative flex h-2.5 w-2.5">
+                        {connectionStatus.binance === 'connected' && (
+                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
+                        )}
+                        <span className={cn("relative inline-flex rounded-full h-2.5 w-2.5 transition-colors duration-500",
+                          connectionStatus.binance === 'connected' ? "bg-green-500" : "bg-red-500"
+                        )}></span>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-1.5 px-2 py-1 bg-background border rounded-md shadow-sm">
+                      <span className="text-[10px] font-bold text-muted-foreground">BB</span>
+                      <div className="relative flex h-2.5 w-2.5">
+                        {connectionStatus.coinswitch === 'connected' && (
+                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
+                        )}
+                        <span className={cn("relative inline-flex rounded-full h-2.5 w-2.5 transition-colors duration-500",
+                          connectionStatus.coinswitch === 'connected' ? "bg-green-500" : "bg-red-500"
+                        )}></span>
+                      </div>
+                    </div>
+                  </div>
                 </div>
 
                 <Button size="sm" variant="outline" onClick={updateTableData} disabled={loading}>
@@ -802,7 +1142,9 @@ function App() {
                   <div className="text-2xl font-bold text-green-500">
                     {sortedData.length}
                   </div>
-                  <p className="text-xs text-muted-foreground">Pairs &gt; {minSpread}% Spread</p>
+                  <p className="text-xs text-muted-foreground">
+                    Page {currentPage} of {totalPages} &gt; {minSpread}% Spread
+                  </p>
                 </CardContent>
               </Card>
 
@@ -831,6 +1173,20 @@ function App() {
                       className="h-8"
                     />
                   </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs whitespace-nowrap w-20">Interval</span>
+                    <select
+                      value={intervalFilter}
+                      onChange={(e) => setIntervalFilter(e.target.value)}
+                      className="h-8 w-full rounded-md border border-input bg-background px-2 text-xs"
+                    >
+                      <option value="all">All</option>
+                      <option value="1h">1H-1H Only</option>
+                      <option value="4h">4H-4H Only</option>
+                      <option value="8h">8H-8H Only</option>
+                      <option value="matched">Matched (Same)</option>
+                    </select>
+                  </div>
                 </CardContent>
               </Card>
             </div>
@@ -843,8 +1199,10 @@ function App() {
                   <TableHeader className="sticky top-0 z-30 bg-background">
                     <TableRow className="bg-muted/50">
                       <TableHead className="w-[100px] font-bold text-primary sticky left-0 z-20 bg-muted/50 shadow-[1px_0_5px_rgba(0,0,0,0.1)]">Symbol</TableHead>
-                      <TableHead className="min-w-[80px] hidden sm:table-cell">Price</TableHead>
-                      <TableHead className="min-w-[80px]">Funding</TableHead>
+                      <TableHead className="min-w-[120px] hidden sm:table-cell">Price (Live)</TableHead>
+                      <TableHead className="min-w-[80px] cursor-pointer hover:text-primary transition-colors hover:bg-muted/50" onClick={() => requestSort('nextFundingTime')}>
+                        Funding {sortConfig.key === 'nextFundingTime' && (sortConfig.direction === 'ascending' ? '↑' : '↓')}
+                      </TableHead>
                       <TableHead className="text-right cursor-pointer hover:text-primary transition-colors hover:bg-muted/50" onClick={() => requestSort('binanceRateRaw')}>
                         Binance {sortConfig.key === 'binanceRateRaw' && (sortConfig.direction === 'ascending' ? '↑' : '↓')}
                       </TableHead>
@@ -853,6 +1211,9 @@ function App() {
                       </TableHead>
                       <TableHead className="text-right cursor-pointer hover:text-primary transition-colors hover:bg-muted/50" onClick={() => requestSort('diff')}>
                         Diff {sortConfig.key === 'diff' && (sortConfig.direction === 'ascending' ? '↑' : '↓')}
+                      </TableHead>
+                      <TableHead className="text-right cursor-pointer hover:text-primary bg-muted/20" onClick={() => requestSort('diffAbs')}>
+                        Diff % {sortConfig.key === 'diffAbs' && (sortConfig.direction === 'ascending' ? '↑' : '↓')}
                       </TableHead>
                       <TableHead className="text-right cursor-pointer hover:text-primary transition-colors hover:bg-muted/50" onClick={() => requestSort('apr')}>
                         APR {sortConfig.key === 'apr' && (sortConfig.direction === 'ascending' ? '↑' : '↓')}
@@ -864,9 +1225,12 @@ function App() {
                     {loading ? (
                       <TableRow>
                         <TableCell colSpan={8} className="h-24 text-center">
-                          <div className="flex justify-center items-center gap-2">
-                            <RefreshCw className="h-5 w-5 animate-spin text-muted-foreground" />
-                            <span className="text-muted-foreground">Fetching market data...</span>
+                          <div className="flex flex-col justify-center items-center gap-2">
+                            <RefreshCw className="h-6 w-6 animate-spin text-blue-500" />
+                            <span className="text-muted-foreground font-medium">
+                              {modeSwitchingRef.current ? `Switching to ${isLive ? 'LIVE' : 'TEST'} mode...` : 'Fetching market data...'}
+                            </span>
+                            <span className="text-xs text-muted-foreground">Please wait, this may take a few seconds</span>
                           </div>
                         </TableCell>
                       </TableRow>
@@ -896,9 +1260,15 @@ function App() {
                               <span className="text-foreground">{item.symbol}</span>
                             </div>
                           </TableCell>
-                          <TableCell className="font-mono text-muted-foreground">
-                            ${item.markPrice ? item.markPrice.toFixed(4) : '0.0000'}
+
+                          {/* Live Prices Column */}
+                          <TableCell className="font-mono text-xs">
+                            <div className="flex flex-col gap-0.5">
+                              <span className="text-muted-foreground">BN: <span className="text-foreground">${item.markPrice ? item.markPrice.toFixed(4) : '0.00'}</span></span>
+                              <span className="text-muted-foreground">BB: <span className="text-foreground">${item.bybitPrice ? item.bybitPrice.toFixed(4) : '0.00'}</span></span>
+                            </div>
                           </TableCell>
+
                           <TableCell className="font-mono text-xs text-muted-foreground">
                             {(() => {
                               if (!item.nextFundingTime) return '-';
@@ -909,22 +1279,43 @@ function App() {
 
                               return (
                                 <div className="flex flex-col">
-                                  <span className="text-xs font-mono">{h}h {m}m</span>
+                                  <span className="text-xs font-mono font-bold text-foreground">{h}h {m}m</span>
                                   <span className="text-[9px] text-muted-foreground font-semibold uppercase leading-tight">
-                                    Bn: {item.intervals?.binance || '?'}h | Bb: {item.intervals?.bybit || '?'}h
+                                    Bn: {item.binanceInterval || 8}h | Bb: {item.bybitInterval || 8}h
                                   </span>
                                 </div>
                               );
                             })()}
                           </TableCell>
-                          <TableCell className={cn("text-right font-medium", item.binanceRate > 0 ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400")}>
-                            {item.binanceRate.toFixed(4)}%
+                          <TableCell className={cn("text-right font-medium relative", item.binanceRate > 0 ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400")}>
+                            {item.binanceRate !== -999 ? (item.binanceRate * 100).toFixed(4) + '%' : '-'}
+                            {item.bnDelta && (
+                              <span className={cn(
+                                "absolute top-1 right-1 text-[8px] transform transition-all duration-500",
+                                item.bnDelta === 'up' ? "text-green-500" : "text-red-500"
+                              )}>
+                                {item.bnDelta === 'up' ? '▲' : '▼'}
+                              </span>
+                            )}
                           </TableCell>
-                          <TableCell className={cn("text-right font-medium", item.bybitRate > 0 ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400")}>
-                            {item.bybitRate ? item.bybitRate.toFixed(4) : '0.0000'}%
+                          <TableCell className={cn("text-right font-medium relative", item.bybitRate > 0 ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400")}>
+                            {item.bybitRate !== -999 ? (item.bybitRate * 100).toFixed(4) + '%' : '-'}
+                            {item.bbDelta && (
+                              <span className={cn(
+                                "absolute top-1 right-1 text-[8px] transform transition-all duration-500",
+                                item.bbDelta === 'up' ? "text-green-500" : "text-red-500"
+                              )}>
+                                {item.bbDelta === 'up' ? '▲' : '▼'}
+                              </span>
+                            )}
                           </TableCell>
                           <TableCell className={cn("text-right font-bold", item.diff > 0 ? "text-green-600 dark:text-green-400" : item.diff < 0 ? "text-red-600 dark:text-red-400" : "text-muted-foreground")}>
-                            {item.diff > 0 ? '+' : ''}{item.diff.toFixed(4)}%
+                            {item.diff !== -999 ? (item.diff > 0 ? '+' : '') + (item.diff * 100).toFixed(4) + '%' : '-'}
+                          </TableCell>
+
+                          {/* Absolute Diff Percentage */}
+                          <TableCell className="text-right font-black bg-muted/10">
+                            {(Math.abs(item.diff) * 100).toFixed(4)}%
                           </TableCell>
                           <TableCell className="text-right font-bold text-blue-600 dark:text-blue-400">
                             {item.apr.toFixed(2)}%
@@ -974,7 +1365,7 @@ function App() {
                                     window.open(`https://www.bybit.com/trade/usdt/${item.symbol}USDT`, '_blank');
                                   }}
                                 >
-                                  <ExternalLink className="w-4 h-4 text-green-500" />
+                                  <ExternalLink className="h-4 w-4" />
                                 </Button>
                               </Tooltip>
                             </div>
@@ -988,16 +1379,47 @@ function App() {
 
               {/* Pagination Controls */}
               {totalPages > 1 && (
-                <div className="flex items-center justify-center gap-2 p-4 border-t">
+                <div className="flex items-center justify-center gap-2 p-4 border-t flex-wrap">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setCurrentPage(1)}
+                    disabled={currentPage === 1}
+                  >
+                    First
+                  </Button>
                   <Button
                     variant="outline"
                     size="sm"
                     onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
                     disabled={currentPage === 1}
                   >
-                    Previous
+                    Prev
                   </Button>
-                  <span className="text-sm font-medium">Page {currentPage} of {totalPages}</span>
+
+                  {/* Page number buttons - show max 5 */}
+                  {(() => {
+                    const pages = [];
+                    let start = Math.max(1, currentPage - 2);
+                    let end = Math.min(totalPages, start + 4);
+                    if (end - start < 4) start = Math.max(1, end - 4);
+
+                    for (let i = start; i <= end; i++) {
+                      pages.push(
+                        <Button
+                          key={i}
+                          variant={i === currentPage ? "default" : "outline"}
+                          size="sm"
+                          onClick={() => setCurrentPage(i)}
+                          className="min-w-[36px]"
+                        >
+                          {i}
+                        </Button>
+                      );
+                    }
+                    return pages;
+                  })()}
+
                   <Button
                     variant="outline"
                     size="sm"
@@ -1005,6 +1427,14 @@ function App() {
                     disabled={currentPage === totalPages}
                   >
                     Next
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setCurrentPage(totalPages)}
+                    disabled={currentPage === totalPages}
+                  >
+                    Last
                   </Button>
                 </div>
               )}
@@ -1022,10 +1452,10 @@ function App() {
 
             {/* Temporarily commented out old modal for direct replacement as per request */}
             {/* <ArbitrageModal
-              isOpen={!!selectedOpportunity}
-              onClose={() => setSelectedOpportunity(null)}
-              data={selectedOpportunity}
-            /> */}
+                isOpen={!!selectedOpportunity}
+                onClose={() => setSelectedOpportunity(null)}
+                data={selectedOpportunity}
+              /> */}
           </>
         )}
 
@@ -1041,4 +1471,3 @@ function App() {
 }
 
 export default App;
-
