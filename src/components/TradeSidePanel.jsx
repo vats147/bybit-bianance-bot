@@ -56,15 +56,16 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
 
     // Dropdown states
     const [showMarginDropdown, setShowMarginDropdown] = useState(false);
-    const [showLeverageDropdown, setShowLeverageDropdown] = useState(false);
 
     // Balance states
     const [balances, setBalances] = useState({ binance: null, bybit: null });
     const [balanceLoading, setBalanceLoading] = useState(false);
 
     // Leverage editing state
+    const [showLeverageDropdown, setShowLeverageDropdown] = useState(false);
     const [isEditingLeverage, setIsEditingLeverage] = useState(false);
     const [leverageInputValue, setLeverageInputValue] = useState("");
+    const [showDetails, setShowDetails] = useState(false); // Toggle for Position Breakdown
 
     // Available options
     const marginModes = ["Cross", "Isolated"];
@@ -718,80 +719,76 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
                             </div>
 
                             {/* Profit Estimates */}
-                            <div className="bg-black/20 rounded p-2 space-y-1">
-                                <div className="flex justify-between text-[10px]">
-                                    <span className="text-gray-400">Per Funding ({Math.min(data?.binanceInterval || 8, data?.bybitInterval || 8)}H)</span>
-                                    <span className="text-green-400 font-bold">+{recommendation.expectedProfit.toFixed(4)}%</span>
+                            <div className="bg-black/20 rounded p-2 space-y-2">
+                                {/* 1. Primary Profit Metrics (Always Visible) */}
+                                <div className="grid grid-cols-2 gap-2 text-xs">
+                                    <div className="bg-green-500/10 rounded p-1.5 border border-green-500/20 text-center">
+                                        <div className="text-gray-400 text-[9px] uppercase tracking-wide">Est. Daily Profit</div>
+                                        <div className="text-green-400 font-bold text-sm">
+                                            +${((Number(amount) * leverage * 2 * recommendation.expectedProfit24h) / 100).toFixed(2)}
+                                        </div>
+                                        <div className="text-[9px] text-green-500/80">
+                                            +{recommendation.expectedProfit24h.toFixed(2)}% / day
+                                        </div>
+                                    </div>
+                                    <div className="bg-purple-500/10 rounded p-1.5 border border-purple-500/20 text-center">
+                                        <div className="text-gray-400 text-[9px] uppercase tracking-wide">ROI on Invest</div>
+                                        <div className="text-purple-400 font-bold text-sm">
+                                            +{(recommendation.expectedProfit24h * leverage * 2).toFixed(2)}%
+                                        </div>
+                                        <div className="text-[9px] text-purple-500/80">
+                                            Daily Return
+                                        </div>
+                                    </div>
                                 </div>
-                                <div className="flex justify-between text-[10px]">
-                                    <span className="text-gray-400">Est. Daily (24H)</span>
-                                    <span className="text-green-400 font-bold">+{recommendation.expectedProfit24h.toFixed(4)}%</span>
-                                </div>
+
                                 {amount && Number(amount) > 0 && (
                                     <>
-                                        <div className="border-t border-white/10 my-1"></div>
-
-                                        {/* Leverage Breakdown - Matches Bybit terminology */}
-                                        <div className="bg-gradient-to-r from-blue-500/10 to-purple-500/10 rounded p-2 mb-2 border border-blue-500/20">
-                                            <div className="text-[10px] text-blue-300 font-bold mb-1.5 flex items-center gap-1">
-                                                📊 Position Breakdown ({leverage}x Leverage)
-                                            </div>
-                                            <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[10px]">
-                                                <div className="flex justify-between">
-                                                    <span className="text-gray-400">IM (Initial Margin):</span>
-                                                    <span className="text-white font-mono font-bold">${Number(amount).toFixed(4)}</span>
-                                                </div>
-                                                <div className="flex justify-between">
-                                                    <span className="text-gray-400">Borrowed:</span>
-                                                    <span className="text-yellow-400 font-mono">${(Number(amount) * (leverage - 1)).toFixed(2)}</span>
-                                                </div>
-                                                <div className="flex justify-between col-span-2">
-                                                    <span className="text-gray-400">Position Value (per side):</span>
-                                                    <span className="text-cyan-400 font-mono">${(Number(amount) * leverage).toFixed(2)}</span>
-                                                </div>
-                                                <div className="flex justify-between col-span-2 border-t border-white/10 pt-1 mt-1">
-                                                    <span className="text-gray-400">Total Exposure (both sides):</span>
-                                                    <span className="text-green-400 font-bold font-mono">${(Number(amount) * leverage).toFixed(2)} × 2 = ${(Number(amount) * leverage * 2).toFixed(2)}</span>
-                                                </div>
-                                            </div>
-                                            <div className="text-[9px] text-gray-500 mt-1.5 border-t border-white/5 pt-1">
-                                                ℹ️ You deposit <span className="text-white">${Number(amount).toFixed(2)}</span> margin × {leverage}x = <span className="text-cyan-400">${(Number(amount) * leverage).toFixed(2)}</span> position per exchange
-                                            </div>
+                                        {/* Toggle Trace Details */}
+                                        <div
+                                            className="flex items-center justify-center gap-1 text-[10px] text-gray-500 cursor-pointer hover:text-white py-1 border-t border-white/5 mt-1"
+                                            onClick={() => setShowDetails(!showDetails)}
+                                        >
+                                            <span>{showDetails ? "Hide Breakdown" : "Show Position Details"}</span>
+                                            <span className={cn("transition-transform", showDetails && "rotate-180")}>▼</span>
                                         </div>
 
-                                        {/* Earnings based on Total Position */}
-                                        <div className="text-[10px] text-gray-500 mb-1">💰 Earnings on <span className="text-green-400 font-bold">${(Number(amount) * leverage * 2).toFixed(2)}</span> total position:</div>
-                                        <div className="flex justify-between text-xs">
-                                            <span className="text-gray-400 flex items-center gap-1">
-                                                <DollarSign className="w-3 h-3" /> Per funding
-                                            </span>
-                                            <span className="text-green-400 font-bold">
-                                                +${((Number(amount) * leverage * 2 * recommendation.expectedProfit) / 100).toFixed(4)}
-                                            </span>
-                                        </div>
-                                        <div className="flex justify-between text-xs">
-                                            <span className="text-gray-400 flex items-center gap-1">
-                                                <Target className="w-3 h-3" /> Daily (24H)
-                                            </span>
-                                            <span className="text-green-400 font-bold">
-                                                +${((Number(amount) * leverage * 2 * recommendation.expectedProfit24h) / 100).toFixed(4)}
-                                            </span>
-                                        </div>
+                                        {/* Collapsible Section */}
+                                        {showDetails && (
+                                            <div className="animate-in fade-in slide-in-from-top-1 duration-200">
+                                                {/* Leverage Breakdown */}
+                                                <div className="bg-gradient-to-r from-blue-500/10 to-purple-500/10 rounded p-2 mb-2 border border-blue-500/20">
+                                                    <div className="text-[10px] text-blue-300 font-bold mb-1.5 flex items-center gap-1">
+                                                        📊 Position Breakdown ({leverage}x)
+                                                    </div>
+                                                    <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[10px]">
+                                                        <div className="flex justify-between">
+                                                            <span className="text-gray-400">IM (Inv):</span>
+                                                            <span className="text-white font-mono font-bold">${Number(amount).toFixed(2)}</span>
+                                                        </div>
+                                                        <div className="flex justify-between">
+                                                            <span className="text-gray-400">Borrowed:</span>
+                                                            <span className="text-yellow-400 font-mono">${(Number(amount) * (leverage - 1)).toFixed(2)}</span>
+                                                        </div>
+                                                        <div className="flex justify-between col-span-2 border-t border-white/10 pt-1 mt-1">
+                                                            <span className="text-gray-400">Total Position:</span>
+                                                            <span className="text-cyan-400 font-bold font-mono">${(Number(amount) * leverage).toFixed(2)} × 2</span>
+                                                        </div>
+                                                    </div>
+                                                </div>
 
-                                        {/* ROI on Your Initial Margin */}
-                                        <div className="border-t border-white/10 mt-2 pt-1">
-                                            <div className="flex justify-between text-xs">
-                                                <span className="text-purple-400 flex items-center gap-1">
-                                                    🎯 ROI on YOUR IM (${Number(amount).toFixed(2)})
-                                                </span>
-                                                <span className="text-purple-400 font-bold">
-                                                    +{(recommendation.expectedProfit24h * leverage * 2).toFixed(4)}%/day
-                                                </span>
+                                                <div className="text-[10px] space-y-1 pt-1">
+                                                    <div className="flex justify-between">
+                                                        <span className="text-gray-400">Yield / Funding</span>
+                                                        <span className="text-green-400">+{recommendation.expectedProfit.toFixed(4)}%</span>
+                                                    </div>
+                                                    <div className="flex justify-between">
+                                                        <span className="text-gray-400">Funding Interval</span>
+                                                        <span className="text-white">{Math.min(data?.binanceInterval || 8, data?.bybitInterval || 8)} Hours</span>
+                                                    </div>
+                                                </div>
                                             </div>
-                                            <div className="text-[9px] text-gray-500 mt-0.5">
-                                                Deposit ${Number(amount).toFixed(2)} → earn ${((Number(amount) * leverage * 2 * recommendation.expectedProfit24h) / 100).toFixed(4)}/day
-                                            </div>
-                                        </div>
+                                        )}
                                     </>
                                 )}
                             </div>
