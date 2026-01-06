@@ -280,8 +280,21 @@ function App() {
       const statusData = await statusRes.json();
       const currentConfig = statusData.config;
 
+      // Get Bot Identity for Backend Keep-Alive
+      let botId = localStorage.getItem("bot_unique_id");
+      if (!botId) {
+        botId = "bot_" + Math.random().toString(36).substr(2, 9);
+        localStorage.setItem("bot_unique_id", botId);
+      }
+      const botName = localStorage.getItem("bot_name") || `Bot-${botId.substr(0, 4)}`;
+
       // Step 2: Update
-      const updatedConfig = { ...currentConfig, active: newState };
+      const updatedConfig = {
+        ...currentConfig,
+        active: newState,
+        bot_id: botId,
+        bot_name: botName
+      };
 
       // Keys needed for update
       const headers = { "Content-Type": "application/json" };

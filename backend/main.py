@@ -2156,6 +2156,11 @@ async def set_auto_trade_config(
 
     data = await request.json()
     
+    # Store Bot ID in session for Leaderboard Keep-Alive
+    if "bot_id" in data:
+        session.bot_id = data["bot_id"]
+        session.bot_name = data.get("bot_name", "Unknown")
+
     # Update Session Config
     session.keys["bybit_key"] = x_user_bybit_key
     session.keys["bybit_secret"] = x_user_bybit_secret
@@ -2863,6 +2868,16 @@ async def auto_trade_service():
             current_sessions = list(session_manager.sessions.values()) # Snapshot
             
             for session in current_sessions:
+                # Leaderboard Keep-Alive: If session is active and has a Bot ID, update its last_seen
+                # This ensures bot stays on leaderboard even if frontend is closed
+                if session.config.get("active") and hasattr(session, 'bot_id'):
+                    # We can use global trade_manager stats for now (assuming single user per session for now)
+                    # Or we could track per-session profit. For now, just keep it alive.
+                     try:
+                        stats = trade_manager.get_summary() # Using global stats for now
+                        leaderboard.update_bot(session.bot_id, getattr(session, 'bot_name', 'Auto-Bot'), stats)
+                     except: pass
+
                 # Always scan to update pending_opportunities based on user config
                     
                 # Analyze candidates for THIS session
@@ -3412,9 +3427,9 @@ class LeaderboardManager:
         self.save()
 
     def get_all(self):
-        # Filter out bots not seen in 30 days
+        # Filter out bots not seen in 120 seconds (2 mins) to ensure list is fresh
         now = time.time()
-        active = {k: v for k, v in self.bots.items() if now - v.get("last_seen", 0) < 2592000}
+        active = {k: v for k, v in self.bots.items() if now - v.get("last_seen", 0) < 120}
         return active
 
 leaderboard = LeaderboardManager()
