@@ -18,9 +18,30 @@ export function DashboardPage() {
     const toast = useToast();
 
     const getBackendUrl = () => {
-        const primary = localStorage.getItem("primary_backend_url") || "https://bianance-bot.onrender.com";
-        const backup = localStorage.getItem("backup_backend_url");
-        return { primary, backup };
+        const savedPrimary = localStorage.getItem("primary_backend_url");
+        const savedBackup = localStorage.getItem("backup_backend_url");
+        const hostname = window.location.hostname;
+
+        // Check if we're on a local network IP
+        const isLocalNetworkIP = /^192\.168\.|^10\.|^172\.(1[6-9]|2\d|3[0-1])\./.test(hostname);
+
+        // If on local network IP, ALWAYS use local backend (primary)
+        if (isLocalNetworkIP) {
+            const localBackend = `http://${hostname}:8000`;
+            // Only use saved URL if it's also a local IP
+            if (savedPrimary && (savedPrimary.includes(hostname) || savedPrimary.includes("localhost") || savedPrimary.includes("127.0.0.1"))) {
+                return { primary: savedPrimary, backup: savedBackup };
+            }
+            return { primary: localBackend, backup: savedBackup };
+        }
+
+        if (hostname === "localhost" || hostname === "127.0.0.1") {
+            const primary = savedPrimary || "http://localhost:8000";
+            return { primary, backup: savedBackup };
+        }
+
+        const primary = savedPrimary || "https://newbot-apj2.onrender.com";
+        return { primary, backup: savedBackup };
     };
 
     const getAuthHeaders = (exchange) => {

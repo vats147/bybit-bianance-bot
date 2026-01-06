@@ -3,14 +3,14 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
-import { Save, Server, Shield, Send, Download, Upload, Activity, Eye, EyeOff, Check, X, Loader2 } from "lucide-react";
+import { Save, Server, Shield, Send, Download, Upload, Activity, Eye, EyeOff, Check, X, Loader2, ExternalLink, RefreshCw } from "lucide-react";
 
 export function SettingsPage() {
     const DEFAULT_TG_TOKEN = "8464876289:AAHctVyJrkl0XZogsCVZg3wjP0MI0W_Ius8";
     const DEFAULT_TG_CHAT_ID = "@arbitagebianance";
 
     const [config, setConfig] = useState({
-        primaryBackendUrl: "https://vats147-bianance-bot.hf.space",
+        primaryBackendUrl: "https://newbot-apj2.onrender.com",
         backupBackendUrl: "",
         // Bybit - Separate Demo and Live keys
         bybitDemoKey: "",
@@ -47,6 +47,11 @@ export function SettingsPage() {
     const [verifyingBybit, setVerifyingBybit] = useState(false);
     const [verifyingBinance, setVerifyingBinance] = useState(false);
 
+    // Demo balance reset states
+    const [targetBalance, setTargetBalance] = useState(1000);
+    const [settingBybitBalance, setSettingBybitBalance] = useState(false);
+    const [balanceResult, setBalanceResult] = useState(null);
+
     const fileInputRef = useRef(null);
 
     useEffect(() => {
@@ -80,7 +85,7 @@ export function SettingsPage() {
         const savedAlertLeadTime = localStorage.getItem("alert_lead_time");
 
         setConfig({
-            primaryBackendUrl: savedPrimary || "https://vats147-bianance-bot.hf.space",
+            primaryBackendUrl: savedPrimary || "https://newbot-apj2.onrender.com",
             backupBackendUrl: savedBackup || "",
             // Bybit
             bybitDemoKey: savedBybitDemoKey || legacyBybitKey || "",

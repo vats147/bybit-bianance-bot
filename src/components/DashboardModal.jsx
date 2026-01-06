@@ -13,12 +13,38 @@ export function DashboardModal() {
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState(null);
 
+    // Helper to get backend URL (with smart network detection)
+    const getBackendUrl = () => {
+        const saved = localStorage.getItem("primary_backend_url");
+        const hostname = window.location.hostname;
+
+        // Check if we're on a local network IP
+        const isLocalNetworkIP = /^192\.168\.|^10\.|^172\.(1[6-9]|2\d|3[0-1])\./.test(hostname);
+
+        // If on local network IP, ALWAYS use local backend (ignore saved cloud URLs)
+        if (isLocalNetworkIP) {
+            const localBackend = `http://${hostname}:8000`;
+            // Only use saved URL if it's also a local IP
+            if (saved && (saved.includes(hostname) || saved.includes("localhost") || saved.includes("127.0.0.1"))) {
+                return saved;
+            }
+            return localBackend;
+        }
+
+        if (hostname === "localhost" || hostname === "127.0.0.1") {
+            return saved || "http://localhost:8000";
+        }
+
+        return saved || "https://newbot-apj2.onrender.com";
+    };
+
     const fetchData = async () => {
         setLoading(true);
         setError(null);
         try {
+            const backendUrl = getBackendUrl();
             // Fetch Wallet Balance
-            const balRes = await fetch("http://127.0.0.1:8000/api/wallet-balance");
+            const balRes = await fetch(`${backendUrl}/api/wallet-balance`);
             const balJson = await balRes.json();
 
             if (balJson.retCode === 0 && balJson.result.list.length > 0) {
@@ -28,7 +54,7 @@ export function DashboardModal() {
             }
 
             // Fetch Transactions
-            const txRes = await fetch("http://127.0.0.1:8000/api/transaction-log");
+            const txRes = await fetch(`${backendUrl}/api/transaction-log`);
             const txJson = await txRes.json();
 
             if (txJson.retCode === 0) {

@@ -35,6 +35,25 @@ const Tooltip = ({ children, content }) => {
     );
 };
 
+const getBackendUrl = () => {
+    const saved = localStorage.getItem("primary_backend_url");
+    const hostname = window.location.hostname;
+    const isLocalNetworkIP = /^192\.168\.|^10\.|^172\.(1[6-9]|2\d|3[0-1])\./.test(hostname);
+
+    if (isLocalNetworkIP) {
+        const localBackend = `http://${hostname}:8000`;
+        if (saved && (saved.includes(hostname) || saved.includes("localhost") || saved.includes("127.0.0.1"))) {
+            return saved;
+        }
+        return localBackend;
+    }
+
+    if (hostname === "localhost" || hostname === "127.0.0.1") {
+        return saved || "http://localhost:8000";
+    }
+    return saved || "https://vats147-funding-bot.hf.space";
+};
+
 export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
     const toast = useToast();
     const [activeTab, setActiveTab] = useState("market");
@@ -188,7 +207,7 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
         const binanceKey = localStorage.getItem("user_binance_key");
         const binanceSecret = localStorage.getItem("user_binance_secret");
         const isTestnet = localStorage.getItem("user_binance_testnet") !== "false";
-        const backendUrl = localStorage.getItem("primary_backend_url") || "https://vats147-bianance-bot.hf.space";
+        const backendUrl = getBackendUrl();
 
         try {
             // Only fetch balances for exchanges with valid keys
@@ -270,7 +289,7 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
         const bybitSecret = localStorage.getItem("user_bybit_secret");
         const binanceKey = localStorage.getItem("user_binance_key");
         const binanceSecret = localStorage.getItem("user_binance_secret");
-        const backendUrl = localStorage.getItem("primary_backend_url") || "https://vats147-bianance-bot.hf.space";
+        const backendUrl = getBackendUrl();
 
         try {
             const res = await fetch(`${backendUrl}/api/positions?symbol=${symbol}`, {
@@ -362,7 +381,7 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
         const binanceSecret = localStorage.getItem("user_binance_secret") || "";
         const isTestnet = localStorage.getItem("user_binance_testnet") !== "false";
 
-        const backendUrl = localStorage.getItem("primary_backend_url") || "https://vats147-bianance-bot.hf.space";
+        const backendUrl = getBackendUrl();
 
         // Smart quantity calculation with proper precision based on price
         // Expensive tokens (BTC, ETH) need more decimals, cheap tokens need integers
@@ -1299,7 +1318,7 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
                             disabled={closingPositions}
                             onClick={async () => {
                                 setClosingPositions(true);
-                                const backendUrl = localStorage.getItem("primary_backend_url") || "https://vats147-bianance-bot.hf.space";
+                                const backendUrl = getBackendUrl();
                                 try {
                                     await fetch(`${backendUrl}/api/close-all-positions`, {
                                         method: "POST",

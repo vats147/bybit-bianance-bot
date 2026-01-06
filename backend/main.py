@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException, Header, Request, WebSocket, WebSocketDisconnect
+from contextlib import asynccontextmanager
 from typing import List
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -22,8 +23,6 @@ try:
 except: pass
 
 # Load environment variables from .env file
-load_dotenv()
-
 # --- SCHEDULER & PROFIT TRACKING ---
 class TradeScheduler:
     def __init__(self):
@@ -31,81 +30,100 @@ class TradeScheduler:
         self.profit_log = [] # List of { time, symbol, profit }
 
     async def execute_trade_sequence(self, task_id, params):
-        """
-        Executes:
-        1. Wait until (TargetTime - 20s) -> MARKET BUY
-        2. Wait until (TargetTime + 10s) -> MARKET SELL
-        3. Record estimated profit
-        """
         try:
-            target_time = params['targetTime'] # Unix timestamp in seconds
+            target_time = params['targetTime']
             now = time.time()
+            if (target_time - 20) - now > 0:
+                self.tasks[task_id]['status'] = f"WAITING_ENTRY"
+                await asyncio.sleep((target_time-20)-now)
             
-            # 1. Wait for Entry (Target - 20s)
-            entry_time = target_time - 20
-            delay_entry = entry_time - now
+            if params.get('platform') == "Both":
+                rates_data = await get_rates() 
+                sym = params['symbol']
+                bin_r = rates_data['binance'].get(sym, {}).get('rate', 0)
+                byb_r = rates_data['bybit'].get(sym, {}).get('rate', 0)
+                if byb_r > bin_r:
+                    params['bybit_side'], params['binance_side'] = "Sell", "Buy"
+                else:
+                    params['bybit_side'], params['binance_side'] = "Buy", "Sell"
             
-            if delay_entry > 0:
-                self.tasks[task_id]['status'] = f"WAITING_ENTRY (Starts in {int(delay_entry)}s)"
-                await asyncio.sleep(delay_entry)
-            
-            # --- EXECUTE ENTRY ---
             self.tasks[task_id]['status'] = "EXECUTING_ENTRY"
+            tasks = []
+            if params['platform'] in ["Bybit", "Both"]:
+                tasks.append(self._internal_place_order(params['symbol'], params['bybit_side'], params['qty'], params['leverage'], "BYBIT", params))
+            if params['platform'] in ["Binance", "Both"]:
+                tasks.append(self._internal_place_order(params['symbol'], params['binance_side'], params['qty'], params['leverage'], "BINANCE", params))
+            await asyncio.gather(*tasks)
             
-            # Call Place Order Logic (Reuse existing function logic or direct call)
-            # For simplicity, we'll simulate the call logic or verify connection
-            # In production, you'd call the `place_order` internal function directly
-            
-            # Entry Order
-            entry_side = params['direction']
-            await self._internal_place_order(params['symbol'], entry_side, params['qty'], params['leverage'], params['platform'])
-            
-            # 2. Wait for Exit (Target + 10s) -> 30s duration from entry
-            # Total wait from Entry point is ~30s (20s pre + 10s post)
-            await asyncio.sleep(30)
-            
-            # --- EXECUTE EXIT ---
+            await asyncio.sleep(params.get('duration', 30))
             self.tasks[task_id]['status'] = "EXECUTING_EXIT"
-            exit_side = "Sell" if entry_side == "Buy" else "Buy"
-            await self._internal_place_order(params['symbol'], exit_side, params['qty'], params['leverage'], params['platform'])
-            
-            # 3. PROFIT CALCULATION ( Simulated / Estimated )
-            # Profit ~ (Position Value * Funding Rate) - Fees
-            # We'll use a simplified estimate: Qty * Mark Price * Funding Rate (if available)
-            estimated_profit = self._calculate_profit(params)
+            exits = []
+            if params['platform'] in ["Bybit", "Both"]:
+                exits.append(self._internal_place_order(params['symbol'], "Sell" if params['bybit_side']=="Buy" else "Buy", params['qty'], params['leverage'], "BYBIT", params))
+            if params['platform'] in ["Binance", "Both"]:
+                exits.append(self._internal_place_order(params['symbol'], "Sell" if params['binance_side']=="Buy" else "Buy", params['qty'], params['leverage'], "BINANCE", params))
+            await asyncio.gather(*exits)
             
             self.tasks[task_id]['status'] = "COMPLETED"
-            self.tasks[task_id]['profit'] = estimated_profit
-            self.profit_log.append({
-                "time": time.time(),
-                "symbol": params['symbol'],
-                "profit": estimated_profit,
-                "type": "Funding Arbitrage"
-            })
-            
         except Exception as e:
-            print(f"Scheduler Error: {e}")
-            self.tasks[task_id]['status'] = f"FAILED: {str(e)}"
+            self.tasks[task_id]['status'] = f"FAILED: {e}"
 
-    async def _internal_place_order(self, symbol, side, qty, leverage, platform):
-        # Depending on platform, call appropriate internal logic
-        # For Demo/Test, we print. For Real, we'd invoke the same logic as the API route.
-        print(f"⚡️ SCHEDULER EXECUTION: {platform} {side} {symbol} x{leverage} Qty:{qty}")
-        
-        # NOTE: To actually execute, we need to extract the logic from `place_order` into a reusable function 
-        # that doesn't depend on FastAPI Request objects (Header dependency injection).
-        # For now, we assume we have default keys or this method handles it.
-        pass
+    async def _internal_place_order(self, symbol, side, qty, leverage, platform, params={}):
+        try:
+             bybit_key = params.get('bybit_key') or os.getenv("USER_BYBIT_KEY") 
+             bybit_secret = params.get('bybit_secret') or os.getenv("USER_BYBIT_SECRET")
+             binance_key = params.get('binance_key') or os.getenv("USER_BINANCE_KEY")
+             binance_secret = params.get('binance_secret') or os.getenv("USER_BINANCE_SECRET")
+             session = session_manager.get_session(bybit_key, bybit_secret, binance_key, binance_secret)
+             is_live = session.config.get('is_live', False) if session else False
+             
+             res = {"status": "error", "message": "Execution bypassed"}
+             if platform == "BYBIT":
+                  api_key = bybit_key or DEFAULT_BYBIT_API_KEY
+                  api_secret = bybit_secret or DEFAULT_BYBIT_SECRET
+                  if api_key and "YOUR_" not in api_key:
+                      res = await execute_bybit_logic(api_key, api_secret, symbol, side, qty, leverage, is_live=is_live)
+             elif platform == "BINANCE":
+                  api_key = binance_key or os.getenv("USER_BINANCE_KEY")
+                  api_secret = binance_secret or os.getenv("USER_BINANCE_SECRET")
+                  if api_key and "YOUR_" not in api_key:
+                      res = await execute_binance_logic(api_key, api_secret, symbol, side, qty, leverage, is_testnet=not is_live)
+
+             return res if res else {"status": "error", "message": "No response"}
+        except Exception as e:
+            raise e
 
     def _calculate_profit(self, params):
-        # Mock calculation based on typical funding rate
-        # Real calculation would need current funding rate fetch
-        return float(params['qty']) * 0.0001 * 100 # Mock: 0.01% of notional? Just a placeholder.
+        return float(params['qty']) * 0.0001 * float(params['leverage'])
 
 scheduler = TradeScheduler()
+load_dotenv()
+
+# --- SCHEDULER & PROFIT TRACKING ---
+# --- SCHEDULER & PROFIT TRACKING ---
+# (Class definition moved lower to consolidate all logic)
 
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup logic
+    asyncio.create_task(update_binance_intervals())
+    asyncio.create_task(update_bybit_intervals())
+    
+    # Start Managers (Both Live and Testnet)
+    binance_live_wm.start(is_live=True)
+    binance_test_wm.start(is_live=False)
+    bybit_ws_manager.start(is_live=True)
+    
+    # Start services
+    asyncio.create_task(broadcast_rates())
+    asyncio.create_task(auto_trade_service())
+    
+    yield
+    # Shutdown logic (optional)
+    print("Shutting down...")
+
+app = FastAPI(lifespan=lifespan)
 
 # Enable CORS for frontend
 app.add_middleware(
@@ -150,6 +168,8 @@ BYBIT_DEMO_URL = os.getenv("BYBIT_DEMO_URL", "https://api-demo.bybit.com")
 
 # Cache for Instrument Info (qtyStep, minOrderQty)
 INSTRUMENT_CACHE = {}
+# Cache for Binance symbol info (precision, stepSize)
+BINANCE_SYMBOL_INFO = {}
 # Cache for Binance Funding Intervals
 BINANCE_INTERVAL_CACHE = {}
 # Cache for Bybit Funding Intervals
@@ -189,30 +209,39 @@ async def update_bybit_intervals():
         print(f"❌ Error updating Bybit Intervals: {e}")
 
 async def update_binance_intervals():
-    """Fetches funding intervals from Binance API (heavy weight, run periodically)."""
-    global BINANCE_INTERVAL_CACHE
+    """Fetches funding intervals from Binance API."""
+    global BINANCE_INTERVAL_CACHE, BINANCE_SYMBOL_INFO
     try:
-        url = "https://fapi.binance.com/fapi/v1/fundingInfo"
-        print(f"DEBUG: Updating Binance Funding Intervals from {url}...")
-        loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(None, requests.get, url)
-        
-        if response.status_code == 200:
-            data = response.json()
-            if isinstance(data, list):
-                count = 0
-                for item in data:
-                    symbol = item.get('symbol', '').replace('USDT', '')
-                    if 'fundingIntervalHours' in item:
-                        BINANCE_INTERVAL_CACHE[symbol] = int(item['fundingIntervalHours'])
-                        count += 1
-                print(f"✅ Loaded Binance Intervals for {count} symbols.")
-            else:
-                 print(f"⚠️ Unexpected Binance FundingInfo format: {type(data)}")
-        else:
-            print(f"⚠️ Failed to fetch Binance Intervals: {response.status_code}")
+        # 1. Update Intervals
+        itv_url = "https://fapi.binance.com/fapi/v1/fundingInfo"
+        print(f"DEBUG: Updating Binance Funding Intervals...")
+        itv_res = await asyncio.to_thread(requests.get, itv_url, timeout=10)
+        if itv_res.status_code == 200:
+            data = itv_res.json()
+            for item in data:
+                s = item.get('symbol', '').replace('USDT', '')
+                if 'fundingIntervalHours' in item:
+                    BINANCE_INTERVAL_CACHE[s] = int(item['fundingIntervalHours'])
+            print(f"✅ Loaded Binance Intervals for {len(BINANCE_INTERVAL_CACHE)} symbols.")
+
+        # 2. Update Exchange Info (Precision)
+        info_url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
+        print(f"DEBUG: Updating Binance Exchange Info (Precision)...")
+        info_res = await asyncio.to_thread(requests.get, info_url, timeout=10)
+        if info_res.status_code == 200:
+            info_data = info_res.json()
+            for s in info_data.get("symbols", []):
+                sym = s["symbol"].replace("USDT","")
+                BINANCE_SYMBOL_INFO[sym] = {
+                    "quantityPrecision": s.get("quantityPrecision", 2),
+                    "stepSize": 0.001 # Default
+                }
+                for f in s.get("filters", []):
+                    if f["filterType"] == "LOT_SIZE":
+                        BINANCE_SYMBOL_INFO[sym]["stepSize"] = float(f["stepSize"])
+            print(f"✅ Loaded Binance Symbol Info for {len(BINANCE_SYMBOL_INFO)} symbols.")
     except Exception as e:
-        print(f"❌ Error updating Binance Intervals: {e}")
+        print(f"❌ Error updating Binance data: {e}")
 
 # --- CLIENT WEBSOCKET MANAGER ---
 class ConnectionManager:
@@ -310,19 +339,6 @@ async def broadcast_rates():
             print(f"Broadcaster Error: {e}")
             await asyncio.sleep(1)
 
-@app.on_event("startup")
-async def startup_event():
-    # Load intervals
-    asyncio.create_task(update_binance_intervals())
-    asyncio.create_task(update_bybit_intervals())
-    
-    # Start Managers (Both Live and Testnet)
-    binance_live_wm.start(is_live=True)
-    binance_test_wm.start(is_live=False)
-    bybit_ws_manager.start(is_live=True) # Bybit is always live/unified
-    
-    # Start Broadcaster
-    asyncio.create_task(broadcast_rates())
 
 
 # --- BINANCE WEBSOCKET CONFIG ---
@@ -1072,8 +1088,12 @@ async def execute_bybit_logic(api_key, api_secret, symbol, side, qty, leverage, 
         if data.get("retCode") == 0:
             return {"status": "success", "data": data["result"], "retMsg": data["retMsg"]}
         else:
+            ret_code = data.get("retCode")
+            msg = data.get("retMsg", "Unknown Error")
+            if ret_code == 10003:
+                msg = "API Key is Invalid. (Check if you are using Live Keys on Testnet or vice-versa)"
             print(f"Bybit API Error: {data}")
-            raise HTTPException(status_code=400, detail=f"Bybit Error: {data.get('retMsg')} (Code: {data.get('retCode')})")
+            raise HTTPException(status_code=400, detail=f"Bybit Error: {msg} (Code: {ret_code})")
 
     except HTTPException as he:
         raise he
@@ -1085,62 +1105,51 @@ async def execute_bybit_logic(api_key, api_secret, symbol, side, qty, leverage, 
 
 
 async def execute_binance_logic(api_key, api_secret, symbol, side, qty, leverage, is_testnet=True):
-    # SAFETY: Always force testnet for trading, regardless of parameter
-    if not is_testnet:
-        print("⚠️ WARNING: Live trading requested but DISABLED for safety. Using testnet.")
-    is_testnet = True  # Force testnet for all trades
-    
     base_url = "https://testnet.binancefuture.com" if is_testnet else "https://fapi.binance.com"
-    endpoint = "/fapi/v1/order"
-    
+    # Ensure symbol is uppercase for Binance
+    usdt_symbol = (symbol.upper() + "USDT") if not symbol.upper().endswith("USDT") else symbol.upper()
+    sym_only = usdt_symbol.replace("USDT","")
+
     try:
         # 1. Set Leverage
         try:
             lev_endpoint = "/fapi/v1/leverage"
             lev_params = {
-                "symbol": symbol + "USDT" if not symbol.endswith("USDT") else symbol,
+                "symbol": usdt_symbol,
                 "leverage": leverage,
                 "timestamp": int(time.time() * 1000)
             }
-            lev_query_string = urlencode(lev_params)
-            lev_signature = hmac.new(api_secret.encode('utf-8'), lev_query_string.encode('utf-8'), hashlib.sha256).hexdigest()
-            
+            lev_qs = urlencode(lev_params)
+            lev_sig = hmac.new(api_secret.encode('utf-8'), lev_qs.encode('utf-8'), hashlib.sha256).hexdigest()
             lev_headers = { "X-MBX-APIKEY": api_key }
-            requests.post(f"{base_url}{lev_endpoint}?{lev_query_string}&signature={lev_signature}", headers=lev_headers)
+            lev_url = f"{base_url}{lev_endpoint}?{lev_qs}&signature={lev_sig}"
+            
+            await asyncio.to_thread(requests.post, lev_url, headers=lev_headers, timeout=5)
         except Exception as e:
             print(f"Binance Leverage Error (Non-fatal): {e}")
 
-        # 2. Place Order
-        # Fetch symbol info for precision
-        try:
-            info_url = f"{base_url}/fapi/v1/exchangeInfo"
-            info_res = requests.get(info_url)
-            if info_res.status_code == 200:
-                s_info = info_res.json()
-                fsym = symbol + "USDT" if not symbol.endswith("USDT") else symbol
-                target_symbol = next((s for s in s_info["symbols"] if s["symbol"] == fsym), None)
-                if target_symbol:
-                    # Quantity Precision
-                    qty_precision = target_symbol.get("quantityPrecision", 2)
-                    
-                    # Also check LOT_SIZE filter if available for stepSize (more accurate)
-                    for f in target_symbol.get("filters", []):
-                        if f["filterType"] == "LOT_SIZE":
-                            step_size = float(f["stepSize"])
-                            if step_size > 0:
-                                import math
-                                # Calculate decimals from stepSize (e.g. 0.001 -> 3)
-                                qty_precision = int(round(-math.log(step_size, 10), 0))
-                    
-                    # Round qty
-                    qty = round(float(qty), qty_precision)
-                    # Use format to avoid scientific notation
-                    qty = f"{qty:.{qty_precision}f}"
-        except Exception as e:
-            print(f"Precision Fetch Error (Non-fatal, using default): {e}")
+        # 2. Precision & Rounding (Use Cache)
+        info = BINANCE_SYMBOL_INFO.get(sym_only)
+        if info:
+            qty_precision = info["quantityPrecision"]
+            step_size = info["stepSize"]
+            
+            # Use stepSize for rounding
+            import math
+            qty_float = float(qty)
+            if step_size > 0:
+                steps = math.floor(qty_float / step_size)
+                qty_rounded = round(steps * step_size, qty_precision)
+                qty = f"{qty_rounded:.{qty_precision}f}"
+            else:
+                qty = f"{qty_float:.{qty_precision}f}"
+        else:
+            # Fallback to simple rounding
+            qty = f"{float(qty):.2f}"
 
+        # 3. Place Order
         params = {
-            "symbol": symbol + "USDT" if not symbol.endswith("USDT") else symbol,
+            "symbol": usdt_symbol,
             "side": side.upper(),
             "type": "MARKET",
             "quantity": qty,
@@ -1149,18 +1158,19 @@ async def execute_binance_logic(api_key, api_secret, symbol, side, qty, leverage
         
         query_string = urlencode(params)
         signature = hmac.new(api_secret.encode('utf-8'), query_string.encode('utf-8'), hashlib.sha256).hexdigest()
-        
-        final_url = f"{base_url}{endpoint}?{query_string}&signature={signature}"
+        final_url = f"{base_url}/fapi/v1/order?{query_string}&signature={signature}"
         headers = { "X-MBX-APIKEY": api_key }
         
-        loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(None, lambda: requests.post(final_url, headers=headers))
-        
+        response = await asyncio.to_thread(requests.post, final_url, headers=headers, timeout=10)
         data = response.json()
         
         if "code" in data and data["code"] != 0:
-             print(f"Binance API Error: {data}")
-             raise HTTPException(status_code=400, detail=f"Binance Error: {data.get('msg')} (Code: {data.get('code')})")
+             code = data["code"]
+             msg = data.get("msg", "Unknown Error")
+             if code == -2015:
+                 msg = "Invalid API-key or Permissions. (Check if using Live Keys on Testnet or vice-versa)"
+             print(f"Binance API Error for {usdt_symbol}: {data}")
+             raise HTTPException(status_code=400, detail=f"Binance Error: {msg} (Code: {code})")
              
         return {"status": "success", "data": data}
 
@@ -1214,6 +1224,144 @@ async def get_wallet_balance(
         import traceback
         traceback.print_exc()
         print(f"Wallet Balance Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class SetDemoBalanceRequest(BaseModel):
+    target_balance: float = 1000.0
+    coin: str = "USDT"
+
+
+@app.post("/api/bybit/set-demo-balance")
+async def set_bybit_demo_balance(
+    request: SetDemoBalanceRequest,
+    x_user_bybit_key: Optional[str] = Header(None),
+    x_user_bybit_secret: Optional[str] = Header(None),
+):
+
+    """
+    Set Bybit demo account balance to a target amount.
+    Only works for DEMO accounts (api-demo.bybit.com).
+    
+    - If current balance < target: Adds the difference
+    - If current balance >= target: Returns error (API cannot reduce funds)
+    """
+    api_key, api_secret = get_api_credentials(x_user_bybit_key, x_user_bybit_secret, require_user_keys=True)
+    
+    try:
+        # Step 1: Get current balance
+        endpoint = "/v5/account/wallet-balance"
+        base_url = BYBIT_DEMO_URL  # Always use demo URL for this endpoint
+        params = "accountType=UNIFIED"
+        
+        timestamp, recv_window, signature = generate_signature(api_key, api_secret, params)
+        
+        headers = {
+            "X-BAPI-API-KEY": api_key,
+            "X-BAPI-SIGN": signature,
+            "X-BAPI-TIMESTAMP": timestamp,
+            "X-BAPI-RECV-WINDOW": recv_window,
+            "Content-Type": "application/json"
+        }
+        
+        final_url = f"{base_url}{endpoint}?{params}"
+        
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(None, lambda: requests.get(final_url, headers=headers))
+        
+        if response.status_code != 200:
+            raise HTTPException(status_code=response.status_code, detail=f"Failed to get current balance: {response.text[:200]}")
+        
+        balance_data = response.json()
+        
+        if balance_data.get("retCode") != 0:
+            raise HTTPException(status_code=400, detail=f"Bybit API Error: {balance_data.get('retMsg')}")
+        
+        # Find current USDT balance
+        current_balance = 0.0
+        try:
+            coins = balance_data.get("result", {}).get("list", [{}])[0].get("coin", [])
+            for coin in coins:
+                if coin.get("coin") == request.coin:
+                    current_balance = float(coin.get("walletBalance", 0))
+                    break
+        except (IndexError, KeyError, TypeError):
+            current_balance = 0.0
+        
+        print(f"Current {request.coin} balance: {current_balance}, Target: {request.target_balance}")
+        
+        # Step 2: Calculate difference
+        difference = request.target_balance - current_balance
+        
+        if difference <= 0:
+            return {
+                "status": "error",
+                "message": f"Current balance ({current_balance:.2f} {request.coin}) is already >= target ({request.target_balance:.2f}). Bybit API cannot reduce funds. Please use the Bybit portal to manually reset your demo account.",
+                "current_balance": current_balance,
+                "target_balance": request.target_balance,
+                "action_needed": "manual_reset"
+            }
+        
+        # Step 3: Add funds via demo-apply-money API
+        apply_endpoint = "/v5/account/demo-apply-money"
+        apply_url = base_url + apply_endpoint
+        
+        # Round to 2 decimal places
+        amount_to_add = round(difference, 2)
+        
+        apply_payload = {
+            "utaDemoApplyMoney": [
+                {
+                    "coin": request.coin,
+                    "amountStr": str(amount_to_add)
+                }
+            ]
+        }
+        
+        payload_json = json.dumps(apply_payload)
+        ts, rw, sig = generate_signature(api_key, api_secret, payload_json)
+        
+        apply_headers = {
+            "X-BAPI-API-KEY": api_key,
+            "X-BAPI-SIGN": sig,
+            "X-BAPI-TIMESTAMP": ts,
+            "X-BAPI-RECV-WINDOW": rw,
+            "Content-Type": "application/json"
+        }
+        
+        print(f"Adding {amount_to_add} {request.coin} to demo account...")
+        apply_response = await loop.run_in_executor(
+            None, 
+            lambda: requests.post(apply_url, headers=apply_headers, data=payload_json)
+        )
+        
+        apply_data = apply_response.json()
+        print(f"Demo apply money response: {apply_data}")
+        
+        if apply_data.get("retCode") == 0:
+            new_balance = current_balance + amount_to_add
+            return {
+                "status": "success",
+                "message": f"Successfully set {request.coin} balance to ~{request.target_balance:.2f}",
+                "previous_balance": current_balance,
+                "amount_added": amount_to_add,
+                "new_balance": new_balance,
+                "coin": request.coin
+            }
+        else:
+            return {
+                "status": "error",
+                "message": f"Failed to add funds: {apply_data.get('retMsg', 'Unknown error')}",
+                "error_code": apply_data.get("retCode"),
+                "current_balance": current_balance
+            }
+            
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f"Set Demo Balance Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/transaction-log")
@@ -1566,164 +1714,7 @@ class ScheduleRequest(BaseModel):
     qty: float
     platform: str = "Both"
 
-class TradeScheduler:
-    def __init__(self):
-        self.tasks = {} # taskId -> { status, details, profit }
-        self.profit_log = [] # List of { time, symbol, profit }
-
-    async def execute_trade_sequence(self, task_id, params):
-        """
-        Executes:
-        1. Wait until (TargetTime - 20s) -> MARKET BUY
-        2. Wait until (TargetTime + 10s) -> MARKET SELL
-        3. Record estimated profit
-        """
-        try:
-            target_time = params['targetTime'] # Unix timestamp in seconds
-            now = time.time()
-            
-            # 1. Wait for Entry (Target - 20s)
-            entry_time = target_time - 20
-            delay_entry = entry_time - now
-            
-            if delay_entry > 0:
-                self.tasks[task_id]['status'] = f"WAITING_ENTRY (Starts in {int(delay_entry)}s)"
-                await asyncio.sleep(delay_entry)
-            
-            # --- CHECK PROFITABILITY & DECIDE DIRECTION (If Auto/Both) ---
-            if params.get('platform') == "Both":
-                # Fetch fresh rates
-                print("Fetching live rates for decision...")
-                rates_data = await get_rates() 
-                binance_r = 0
-                bybit_r = 0
-                
-                # Extract Rates
-                sym = params['symbol']
-                if sym in rates_data['binance']: binance_r = rates_data['binance'][sym]['rate']
-                if sym in rates_data['bybit']: bybit_r = rates_data['bybit'][sym]['rate']
-                
-                print(f"Rates Check - Binance: {binance_r*100}%, Bybit: {bybit_r*100}%")
-                
-                # Logic: Short Higher Rate, Long Lower Rate
-                # If Bybit > Binance: Short Bybit, Long Binance
-                # If Binance > Bybit: Short Binance, Long Bybit
-                
-                if bybit_r > binance_r:
-                    # Short Bybit, Long Binance
-                    params['bybit_side'] = "Sell"
-                    params['binance_side'] = "Buy"
-                else:
-                    # Short Binance, Long Bybit
-                    params['bybit_side'] = "Buy"
-                    params['binance_side'] = "Sell"
-                    
-                self.tasks[task_id]['details'] = f"Decision: Long {params['binance_side']=='Buy' and 'Binance' or 'Bybit'}, Short {params['binance_side']=='Sell' and 'Binance' or 'Bybit'}"
-            else:
-                # Single Platform
-                params['bybit_side'] = params['direction'] if params['platform'] == "Bybit" else None
-                params['binance_side'] = params['direction'] if params['platform'] == "Binance" else None
-
-            # --- EXECUTE ENTRY ---
-            self.tasks[task_id]['status'] = "EXECUTING_ENTRY"
-            
-            # Execute concurrently? Or sequential? Sequential is safer for nonce but slower.
-            # Arbitrage needs simultaneous.
-            
-            tasks = []
-            if params['platform'] == "Bybit" or params['platform'] == "Both":
-                 side = params['bybit_side']
-                 tasks.append(self._internal_place_order(params['symbol'], side, params['qty'], params['leverage'], "BYBIT", params))
-            
-            if params['platform'] == "Binance" or params['platform'] == "Both":
-                 side = params['binance_side']
-                 tasks.append(self._internal_place_order(params['symbol'], side, params['qty'], params['leverage'], "BINANCE", params))
-            
-            await asyncio.gather(*tasks)
-            
-            # 2. Wait for Exit (Target + Duration) 
-            # Default to 30s if not specified
-            trade_duration = params.get('duration', 30)
-            print(f"Waiting for {trade_duration}s before exit...")
-            await asyncio.sleep(trade_duration)
-            
-            # --- EXECUTE EXIT ---
-            self.tasks[task_id]['status'] = "EXECUTING_EXIT"
-            
-            exit_tasks = []
-            if params['platform'] == "Bybit" or params['platform'] == "Both":
-                 side = "Sell" if params['bybit_side'] == "Buy" else "Buy"
-                 exit_tasks.append(self._internal_place_order(params['symbol'], side, params['qty'], params['leverage'], "BYBIT", params))
-            
-            if params['platform'] == "Binance" or params['platform'] == "Both":
-                 side = "Sell" if params['binance_side'] == "Buy" else "Buy"
-                 exit_tasks.append(self._internal_place_order(params['symbol'], side, params['qty'], params['leverage'], "BINANCE", params))
-
-            await asyncio.gather(*exit_tasks)
-            
-            # 3. PROFIT CALCULATION ( Simulated / Estimated )
-            # Profit ~ (Position Value * Funding Rate) - Fees
-            # We'll use a simplified estimate: Qty * Mark Price * Funding Rate (if available)
-            estimated_profit = self._calculate_profit(params)
-            
-            self.tasks[task_id]['status'] = "COMPLETED"
-            self.tasks[task_id]['profit'] = estimated_profit
-            self.profit_log.append({
-                "time": time.time(),
-                "symbol": params['symbol'],
-                "profit": estimated_profit,
-                "type": "Funding Arbitrage"
-            })
-            
-        except Exception as e:
-            print(f"Scheduler Error: {e}")
-            self.tasks[task_id]['status'] = f"FAILED: {str(e)}"
-
-    async def _internal_place_order(self, symbol, side, qty, leverage, platform, params={}):
-        # Depending on platform, call appropriate internal logic
-        print(f"⚡️ SCHEDULER EXECUTION: {platform} {side} {symbol} x{leverage} Qty:{qty}")
-        
-        # REAL EXECUTION USING KEYS (Params > Env)
-        try:
-            if platform == "BYBIT" or platform == "Both":
-                 # Load Keys (Params first, then Env)
-                 api_key = params.get('bybit_key') or os.getenv("USER_BYBIT_KEY") 
-                 api_secret = params.get('bybit_secret') or os.getenv("USER_BYBIT_SECRET")
-                 
-                 if not api_key:
-                     # Check fallbacks or default demo
-                     api_key = DEFAULT_BYBIT_API_KEY
-                     api_secret = DEFAULT_BYBIT_SECRET
-                 
-                 # Only execute if we have keys (and not placeholder)
-                 if api_key and "YOUR_" not in api_key:
-                     print(f"Executing Bybit Order via Scheduler...")
-                     await execute_bybit_logic(api_key, api_secret, symbol, side, qty, leverage)
-            
-            if platform == "BINANCE" or platform == "Both":
-                 # Load Keys
-                 api_key = params.get('binance_key') or os.getenv("USER_BINANCE_KEY") 
-                 api_secret = params.get('binance_secret') or os.getenv("USER_BINANCE_SECRET")
-                 
-                 if api_key and "YOUR_" not in api_key:
-                     print(f"Executing Binance Order via Scheduler...")
-                     # Assume Testnet for Scheduler unless specified?
-                     is_testnet = True 
-                     await execute_binance_logic(api_key, api_secret, symbol, side, qty, leverage, is_testnet)
-
-        except Exception as e:
-            print(f"❌ Scheduler Execution Failed: {e}")
-            raise e
-
-
-    def _calculate_profit(self, params):
-        # Mock calculation
-        # In real world, fetch current funding rate for symbol
-        return float(params['qty']) * 0.0001 * float(params['leverage']) # Mock 0.01%
-
-
-scheduler = TradeScheduler()
-@app.post("/api/schedule-trade")
+# Duplicate TradeScheduler removed.@app.post("/api/schedule-trade")
 async def schedule_trade(
     req: ScheduleRequest,
     x_user_bybit_key: Optional[str] = Header(None),
@@ -1940,35 +1931,131 @@ async def get_positions(
 
 # --- Auto-Trade State & Logic ---
 
-AUTO_TRADE_CONFIG = {
-    "active": False,
-    "total_investment": 100.0,
-    "max_trades": 1,
-    "leverage": 10,
-    "min_diff": 0.01,
-    "is_live": False,
-    "start_time": "00:00",
-    "end_time": "23:59",
-    "max_price_diff": 2.0,
-    "auto_exit": True,
-    "entry_window": 300,
-    # New fields
-    "entry_before_seconds": 60,   # Enter X seconds before funding
-    "exit_after_seconds": 30,     # Exit X seconds after funding
-    "ignore_timing": False,       # If True, show upcoming trades instead of timing-based execution
-    # Stored keys for autonomous trading (set via config POST with headers)
-    "keys": {
-        "bybit_key": None,
-        "bybit_secret": None,
-        "binance_key": None,
-        "binance_secret": None
-    }
-}
 
-AUTO_TRADE_LOGS = [] # List of trade events
-ACTIVE_AUTO_TRADES = {} # symbol -> { 'entry_time': ..., 'amount': ..., 'sides': {...} }
-MANUAL_CLOSED_TRADES = {} # symbol -> timestamp (cooldown)
-PENDING_OPPORTUNITIES = [] # List of symbols in radar for next funding window
+# --- USER SESSION MANAGEMENT ---
+
+class UserSession:
+    def __init__(self, user_id, keys):
+        self.user_id = user_id
+        self.keys = keys # { 'bybit_key', 'bybit_secret', 'binance_key', 'binance_secret' }
+        self.config = {
+            "active": False,
+            "total_investment": 100.0,
+            "max_trades": 1,
+            "leverage": 10,
+            "min_diff": 0.01,
+            "is_live": False,
+            "start_time": "00:00",
+            "end_time": "23:59",
+            "max_price_diff": 2.0,
+            "auto_exit": True,
+            "entry_window": 300,
+            "entry_before_seconds": 60,
+            "exit_after_seconds": 30,
+            "ignore_timing": False
+        }
+        self.logs = []
+        self.active_trades = {} # symbol -> trade_info
+        self.manual_closed_trades = {} # symbol -> timestamp
+        self.failed_trades = {} # symbol -> timestamp
+        self.pending_opportunities = []
+        self.last_active_time = time.time()
+        self.last_balance_warning = 0
+        self.last_entry_time = 0 
+
+class SessionManager:
+    def __init__(self):
+        self.sessions = {} # user_id -> UserSession
+        self.persistence_file = "sessions.json"
+        self.load_sessions()
+
+    def get_user_id(self, bybit_key, binance_key):
+        # Create a unique ID based on the keys
+        raw = f"{bybit_key or ''}:{binance_key or ''}"
+        return hashlib.sha256(raw.encode()).hexdigest()
+
+    def save_sessions(self):
+        try:
+            data = {}
+            for uid, sess in self.sessions.items():
+                data[uid] = {
+                    "keys": sess.keys,
+                    "config": sess.config,
+                    "active_trades": sess.active_trades # Save full state
+                }
+            with open(self.persistence_file, "w") as f:
+                json.dump(data, f)
+        except Exception as e:
+            print(f"Session Save Error: {e}")
+
+    def load_sessions(self):
+        try:
+            if os.path.exists(self.persistence_file):
+                with open(self.persistence_file, "r") as f:
+                    data = json.load(f)
+                    for uid, info in data.items():
+                        # Reconstruct session
+                        sess = UserSession(uid, info.get("keys", {}))
+                        if "config" in info:
+                            sess.config = info["config"]
+                        if "active_trades" in info:
+                            # Robustness: Ensure active_trades is a dictionary
+                            if isinstance(info["active_trades"], dict):
+                                sess.active_trades = info["active_trades"]
+                            else:
+                                sess.active_trades = {} # Reset if corrupt
+                        self.sessions[uid] = sess
+                print(f"Loaded {len(self.sessions)} sessions from disk.")
+        except Exception as e:
+            print(f"Session Load Error: {e}")
+
+    def get_session(self, bybit_key, bybit_secret, binance_key, binance_secret):
+        user_id = self.get_user_id(bybit_key, binance_key)
+        
+        if user_id not in self.sessions:
+            print(f"🆕 Creating new session for User {user_id[:8]}...")
+            keys = {
+                "bybit_key": bybit_key,
+                "bybit_secret": bybit_secret,
+                "binance_key": binance_key,
+                "binance_secret": binance_secret
+            }
+            self.sessions[user_id] = UserSession(user_id, keys)
+            self.save_sessions() # Save new session
+        
+        # Update keys if they changed
+        self.sessions[user_id].last_active_time = time.time()
+        
+        # We should also update keys inside the session object if provided, 
+        # but UserSession keys are usually static for the ID.
+        
+        return self.sessions[user_id]
+
+# Global Session Manager
+session_manager = SessionManager()
+
+# --- HELPER FOR ENDPOINTS ---
+def get_current_session(
+    x_user_bybit_key: Optional[str] = Header(None),
+    x_user_bybit_secret: Optional[str] = Header(None),
+    x_user_binance_key: Optional[str] = Header(None),
+    x_user_binance_secret: Optional[str] = Header(None)
+):
+    # If no keys provided in headers (e.g. initial load), usage is limited.
+    if not x_user_bybit_key and not x_user_binance_key:
+         if os.getenv("USER_BYBIT_KEY") or os.getenv("USER_BINANCE_KEY"):
+             return session_manager.get_session(
+                 os.getenv("USER_BYBIT_KEY"),
+                 os.getenv("USER_BYBIT_SECRET"),
+                 os.getenv("USER_BINANCE_KEY"),
+                 os.getenv("USER_BINANCE_SECRET")
+             )
+         return None
+
+    return session_manager.get_session(
+        x_user_bybit_key, x_user_bybit_secret, x_user_binance_key, x_user_binance_secret
+    )
+
 
 @app.post("/api/auto-trade/config")
 async def set_auto_trade_config(
@@ -1978,96 +2065,228 @@ async def set_auto_trade_config(
     x_user_binance_key: Optional[str] = Header(None),
     x_user_binance_secret: Optional[str] = Header(None)
 ):
+    session = get_current_session(x_user_bybit_key, x_user_bybit_secret, x_user_binance_key, x_user_binance_secret)
+    if not session:
+        return {"status": "error", "message": "API Keys required to save configuration."}
+
     data = await request.json()
-    global AUTO_TRADE_CONFIG
-    AUTO_TRADE_CONFIG.update({
-        "active": data.get("active", AUTO_TRADE_CONFIG["active"]),
-        "total_investment": float(data.get("total_investment", AUTO_TRADE_CONFIG["total_investment"])),
-        "max_trades": int(data.get("max_trades", AUTO_TRADE_CONFIG["max_trades"])),
-        "leverage": int(data.get("leverage", AUTO_TRADE_CONFIG["leverage"])),
-        "min_diff": float(data.get("min_diff", AUTO_TRADE_CONFIG["min_diff"])),
-        "is_live": data.get("is_live", AUTO_TRADE_CONFIG["is_live"]),
-        "start_time": data.get("start_time", AUTO_TRADE_CONFIG["start_time"]),
-        "end_time": data.get("end_time", AUTO_TRADE_CONFIG["end_time"]),
-        "max_price_diff": float(data.get("max_price_diff", AUTO_TRADE_CONFIG["max_price_diff"])),
-        "auto_exit": data.get("auto_exit", AUTO_TRADE_CONFIG["auto_exit"]),
-        "entry_window": int(data.get("entry_window", AUTO_TRADE_CONFIG["entry_window"])),
-        "entry_before_seconds": int(data.get("entry_before_seconds", AUTO_TRADE_CONFIG.get("entry_before_seconds", 60))),
-        "exit_after_seconds": int(data.get("exit_after_seconds", AUTO_TRADE_CONFIG.get("exit_after_seconds", 30))),
-        "ignore_timing": data.get("ignore_timing", AUTO_TRADE_CONFIG.get("ignore_timing", False))
+    
+    # Update Session Config
+    session.keys["bybit_key"] = x_user_bybit_key
+    session.keys["bybit_secret"] = x_user_bybit_secret
+    session.keys["binance_key"] = x_user_binance_key
+    session.keys["binance_secret"] = x_user_binance_secret
+    
+    session.config.update({
+        "active": data.get("active", session.config["active"]),
+        "total_investment": float(data.get("total_investment", session.config["total_investment"])),
+        "max_trades": int(data.get("max_trades", session.config["max_trades"])),
+        "leverage": int(data.get("leverage", session.config["leverage"])),
+        "min_diff": float(data.get("min_diff", session.config["min_diff"])),
+        "is_live": data.get("is_live", session.config["is_live"]),
+        "start_time": data.get("start_time", session.config["start_time"]),
+        "end_time": data.get("end_time", session.config["end_time"]),
+        "max_price_diff": float(data.get("max_price_diff", session.config["max_price_diff"])),
+        "auto_exit": data.get("auto_exit", session.config["auto_exit"]),
+        "entry_window": int(data.get("entry_window", session.config["entry_window"])),
+        "entry_before_seconds": int(data.get("entry_before_seconds", session.config.get("entry_before_seconds", 60))),
+        "exit_after_seconds": int(data.get("exit_after_seconds", session.config.get("exit_after_seconds", 30))),
+        "ignore_timing": data.get("ignore_timing", session.config.get("ignore_timing", False))
     })
     
-    # Store keys from headers if provided (for autonomous trading)
-    if x_user_bybit_key:
-        AUTO_TRADE_CONFIG["keys"]["bybit_key"] = x_user_bybit_key
-    if x_user_bybit_secret:
-        AUTO_TRADE_CONFIG["keys"]["bybit_secret"] = x_user_bybit_secret
-    if x_user_binance_key:
-        AUTO_TRADE_CONFIG["keys"]["binance_key"] = x_user_binance_key
-    if x_user_binance_secret:
-        AUTO_TRADE_CONFIG["keys"]["binance_secret"] = x_user_binance_secret
+    session_manager.save_sessions()
         
-    # Log if keys were stored
-    has_keys = bool(AUTO_TRADE_CONFIG["keys"]["bybit_key"] or AUTO_TRADE_CONFIG["keys"]["binance_key"])
-    print(f"Config updated. Keys stored: {has_keys}")
+    print(f"Config updated for User {session.user_id[:8]}. Active: {session.config['active']}")
     
-    # Return config without exposing keys
-    safe_config = {k: v for k, v in AUTO_TRADE_CONFIG.items() if k != "keys"}
-    safe_config["has_keys"] = has_keys
+    # Return config without keys
+    safe_config = session.config.copy()
+    safe_config["has_keys"] = True
     return {"status": "updated", "config": safe_config}
 
+@app.delete("/api/auto-trade/trade/{symbol}")
+async def close_manual_trade(
+    symbol: str, 
+    close_on_exchange: bool = False,
+    x_user_bybit_key: Optional[str] = Header(None),
+    x_user_bybit_secret: Optional[str] = Header(None),
+    x_user_binance_key: Optional[str] = Header(None),
+    x_user_binance_secret: Optional[str] = Header(None)
+):
+    session = get_current_session(x_user_bybit_key, x_user_bybit_secret, x_user_binance_key, x_user_binance_secret)
+    if not session:
+        raise HTTPException(status_code=400, detail="Session not found or keys missing")
+    
+    # Normalize symbol
+    target_symbol = symbol
+    if target_symbol not in session.active_trades:
+         if f"{symbol}USDT" in session.active_trades:
+             target_symbol = f"{symbol}USDT"
+         else:
+             # Just return success if already gone, to fix UI state
+             return {"status": "ignored", "message": "Trade not found in active session"}
+
+    trade_info = session.active_trades[target_symbol]
+    
+    if close_on_exchange:
+        try:
+            # Extract info
+            sides = trade_info.get("sides", {})
+            entry_side_binance = sides.get("binance", "BUY")
+            entry_side_bybit = sides.get("bybit", "Buy")
+            
+            close_side_binance = "SELL" if str(entry_side_binance).upper() == "BUY" else "BUY"
+            close_side_bybit = "Sell" if str(entry_side_bybit).capitalize() == "Buy" else "Buy"
+            
+            qty_binance = trade_info.get("qty_binance", 0)
+            qty_bybit = trade_info.get("qty_bybit", 0)
+            leverage = int(session.config.get("leverage", 10))
+            is_live = session.config.get("is_live", False)
+            
+            # Execute Both
+            tasks = [
+                execute_bybit_logic(session.keys['bybit_key'], session.keys['bybit_secret'], target_symbol, close_side_bybit, qty_bybit, leverage, is_live=is_live),
+                execute_binance_logic(session.keys['binance_key'], session.keys['binance_secret'], target_symbol, close_side_binance, qty_binance, leverage, is_testnet=not is_live)
+            ]
+            await asyncio.gather(*tasks)
+            
+        except Exception as e:
+            print(f"Error closing positions for {target_symbol}: {e}")
+            # We continue to remove it from session locally even if exchange fails?
+            # Ideally yes, to prevent stuck UI.
+
+    # Remove from active
+    if target_symbol in session.active_trades:
+        del session.active_trades[target_symbol]
+    
+    # Add to cooldown
+    session.manual_closed_trades[target_symbol] = time.time()
+    session_manager.save_sessions()
+    
+    return {"status": "success", "message": f"Trade {target_symbol} removed/closed"}
+
+@app.post("/api/auto-trade/exit/{symbol}")
+async def simulate_auto_exit(
+    symbol: str,
+    x_user_bybit_key: Optional[str] = Header(None),
+    x_user_bybit_secret: Optional[str] = Header(None),
+    x_user_binance_key: Optional[str] = Header(None),
+    x_user_binance_secret: Optional[str] = Header(None)
+):
+    """Manually triggers the exit logic for an active trade immediately (for testing)."""
+    session = get_current_session(x_user_bybit_key, x_user_bybit_secret, x_user_binance_key, x_user_binance_secret)
+    if not session:
+        raise HTTPException(status_code=400, detail="Session not found")
+    
+    target_symbol = symbol
+    if target_symbol not in session.active_trades:
+         if f"{symbol}USDT" in session.active_trades:
+             target_symbol = f"{symbol}USDT"
+         else:
+             raise HTTPException(status_code=404, detail=f"No active trade found for {symbol}")
+
+    trade = session.active_trades[target_symbol]
+    
+    msg = f"🧪 SIMULATING EXIT: {target_symbol}..."
+    print(msg)
+    try:
+        await manager.broadcast(json.dumps({"type": "log", "msg": msg, "color": "orange"}))
+    except:
+        pass
+
+    try:
+        e_bin = "SELL" if str(trade['sides']['binance']).upper() == "BUY" else "BUY"
+        e_byb = "Sell" if str(trade['sides']['bybit']).capitalize() == "Buy" else "Buy"
+        leverage = int(session.config.get("leverage", 10))
+        
+        await execute_auto_trade_exit(
+            target_symbol, 
+            e_bin, 
+            e_byb, 
+            trade['qty_binance'], 
+            trade['qty_bybit'], 
+            leverage, 
+            session.config["is_live"], 
+            session
+        )
+        
+        session.logs.append({
+            "time": time.time(),
+            "type": "EXIT (SIMULATE)",
+            "symbol": target_symbol,
+            "msg": f"Manual simulation of auto-exit triggered"
+        })
+        
+        if target_symbol in session.active_trades:
+            del session.active_trades[target_symbol]
+        
+        session_manager.save_sessions()
+        return {"status": "success", "message": f"Exit simulated for {target_symbol}"}
+    except Exception as e:
+        err = f"Simulation Error: {str(e)}"
+        print(err)
+        try:
+            await manager.broadcast(json.dumps({"type": "error", "msg": err}))
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=err)
+
 @app.get("/api/auto-trade/status")
-async def get_auto_trade_status():
-    # Return config without exposing keys
-    safe_config = {k: v for k, v in AUTO_TRADE_CONFIG.items() if k != "keys"}
-    safe_config["has_keys"] = bool(AUTO_TRADE_CONFIG["keys"]["bybit_key"] or AUTO_TRADE_CONFIG["keys"]["binance_key"])
+async def get_auto_trade_status(
+    x_user_bybit_key: Optional[str] = Header(None),
+    x_user_bybit_secret: Optional[str] = Header(None),
+    x_user_binance_key: Optional[str] = Header(None),
+    x_user_binance_secret: Optional[str] = Header(None)
+):
+    session = get_current_session(x_user_bybit_key, x_user_bybit_secret, x_user_binance_key, x_user_binance_secret)
     
-    # DEBUG: Print current settings
-    print(f"📊 AUTO-TRADE STATUS REQUEST")
-    print(f"   Active: {AUTO_TRADE_CONFIG['active']}")
-    print(f"   Min Diff: {AUTO_TRADE_CONFIG['min_diff']}%")
-    print(f"   Max Price Diff: {AUTO_TRADE_CONFIG.get('max_price_diff', 2.0)}%")
-    print(f"   Pending Opportunities: {len(PENDING_OPPORTUNITIES)}")
-    if len(PENDING_OPPORTUNITIES) > 0:
-        print(f"   Top 3: {[p['symbol'] for p in PENDING_OPPORTUNITIES[:3]]}")
+    if not session:
+        return {
+             "config": { "active": False, "has_keys": False },
+             "active_trades": 0,
+             "active_positions": [],
+             "pending_opportunities": [],
+             "logs": []
+        }
+
+    safe_config = session.config.copy()
+    safe_config["has_keys"] = True
     
-    # Construct detailed active positions list (sanitize keys)
-    active_positions = []
-    for sym, data in ACTIVE_AUTO_TRADES.items():
+    # Construct detailed active positions list
+    active_positions_list = []
+    for sym, data in session.active_trades.items():
         pos = data.copy()
-        if "keys" in pos: del pos["keys"] # Remove sensitive keys
+        if "keys" in pos: del pos["keys"]
         pos["symbol"] = sym
-        active_positions.append(pos)
+        active_positions_list.append(pos)
 
     return {
         "config": safe_config,
-        "active_trades": len(ACTIVE_AUTO_TRADES),
-        "active_symbols": list(ACTIVE_AUTO_TRADES.keys()),
-        "active_positions": active_positions, # New detailed list
-        "pending_opportunities": PENDING_OPPORTUNITIES[:10],  # Top 10 pending
-        "logs": AUTO_TRADE_LOGS[-50:]  # Return last 50 logs
+        "active_trades": len(session.active_trades),
+        "active_symbols": list(session.active_trades.keys()),
+        "active_positions": active_positions_list,
+        "pending_opportunities": session.pending_opportunities[:10],
+        "logs": session.logs[-50:]
     }
 
-async def _internal_force_trade_logic(x_user_bybit_key, x_user_bybit_secret, x_user_binance_key, x_user_binance_secret):
+async def _internal_force_trade_logic(session: UserSession):
     try:
-        global AUTO_TRADE_LOGS, ACTIVE_AUTO_TRADES
+        # Use session-specific config
+        config = session.config
         
-        # 1. Fetch Rates from both exchanges
-        base_url = "https://fapi.binance.com" if AUTO_TRADE_CONFIG["is_live"] else "https://testnet.binancefuture.com"
+        # 1. Fetch Rates (Shared logic? No, live/testnet depends on user config)
+        base_url = "https://fapi.binance.com" if config["is_live"] else "https://testnet.binancefuture.com"
         loop = asyncio.get_event_loop()
         r = await loop.run_in_executor(None, requests.get, f"{base_url}/fapi/v1/premiumIndex")
         data_binance = r.json()
-        data_bybit_map = await fetch_bybit_rates(is_live=AUTO_TRADE_CONFIG["is_live"])
+        data_bybit_map = await fetch_bybit_rates(is_live=config["is_live"])
         
-        # 2. Analyze candidates - compare funding rates for ARBITRAGE direction
+        # 2. Analyze candidates
         candidates = []
         for item in data_binance:
             if not item['symbol'].endswith('USDT'): continue
             symbol = item['symbol'].replace('USDT', '')
             
-            # Skip symbols with active trades to prevent duplicates
-            if symbol in ACTIVE_AUTO_TRADES:
-                print(f"Skipping {symbol} - already has active position")
+            if symbol in session.active_trades:
                 continue
                 
             if symbol not in data_bybit_map: continue
@@ -2078,15 +2297,13 @@ async def _internal_force_trade_logic(x_user_bybit_key, x_user_bybit_secret, x_u
                 mark_price_binance = float(item['markPrice'])
                 bybit_price = data_bybit_map[symbol]['markPrice']
                 
-                # Calculate funding rate difference (arbitrage opportunity)
                 rate_diff = abs(binance_rate - bybit_rate)
                 
                 price_diff_pct = 0
                 if mark_price_binance > 0:
                     price_diff_pct = abs(mark_price_binance - bybit_price) / mark_price_binance * 100
                 
-                # Min diff filter - still useful for force trades
-                if rate_diff * 100 >= AUTO_TRADE_CONFIG["min_diff"]:
+                if rate_diff * 100 >= config["min_diff"]:
                     candidates.append({
                         "symbol": symbol,
                         "binance_rate": binance_rate,
@@ -2098,97 +2315,55 @@ async def _internal_force_trade_logic(x_user_bybit_key, x_user_bybit_secret, x_u
                         "nextFundingTime": int(item['nextFundingTime']) 
                     })
             except Exception as e:
-                print(f"Error processing {symbol}: {e}")
                 continue
             
-        # Sort by best arbitrage opportunity (rate difference)
         candidates.sort(key=lambda x: x['rate_diff'], reverse=True)
         
         if not candidates:
-            return {"status": "error", "message": "No suitable candidates found (all skipped or no diff)"}
+            return {"status": "error", "message": "No suitable candidates found"}
         
-        # Pick the best candidate
         best = candidates[0]
         sym = best['symbol']
         
-        # Determine arbitrage direction:
         if best['binance_rate'] > best['bybit_rate']:
-            # Binance higher = Short Binance, Long Bybit
             side_binance = "Sell"
             side_bybit = "Buy"
         else:
-            # Bybit higher = Short Bybit, Long Binance
             side_binance = "Buy"
             side_bybit = "Sell"
         
-        inv = AUTO_TRADE_CONFIG["total_investment"]
-        lev = AUTO_TRADE_CONFIG["leverage"]
+        inv = config["total_investment"]
+        lev = config["leverage"]
         
-        per_trade_amt = inv / max(1, AUTO_TRADE_CONFIG["max_trades"])
-        qty_binance = (per_trade_amt * lev) / best['markPrice']
-        qty_binance = round(qty_binance, 3)
+        per_trade_amt = inv / max(1, config["max_trades"])
+        qty_binance = round((per_trade_amt * lev) / best['markPrice'], 3)
+        qty_bybit = round((per_trade_amt * lev) / best['bybitPrice'], 3)
         
-        qty_bybit = (per_trade_amt * lev) / best['bybitPrice']
-        qty_bybit = round(qty_bybit, 3)
+        print(f"Forcing Trade (User {session.user_id[:8]}): {sym}")
         
-        print(f"Forcing Trade: {sym} BN:{best['binance_rate']*100:.4f}% BB:{best['bybit_rate']*100:.4f}% Diff:{best['rate_diff']*100:.4f}%")
-        print(f"Direction: Binance={side_binance}, Bybit={side_bybit}, QtyBN={qty_binance}, QtyBB={qty_bybit}")
+        await execute_auto_trade_entry(sym, side_binance, side_bybit, qty_binance, qty_bybit, lev, session.keys)
         
-        # Get keys - prefer header keys, fallback to stored keys
-        keys = {
-            "bybit_key": x_user_bybit_key or AUTO_TRADE_CONFIG["keys"].get("bybit_key"),
-            "bybit_secret": x_user_bybit_secret or AUTO_TRADE_CONFIG["keys"].get("bybit_secret"),
-            "binance_key": x_user_binance_key or AUTO_TRADE_CONFIG["keys"].get("binance_key"),
-            "binance_secret": x_user_binance_secret or AUTO_TRADE_CONFIG["keys"].get("binance_secret")
-        }
-        
-        # Execute the entry trade
-        await execute_auto_trade_entry(sym, side_binance, side_bybit, qty_binance, qty_bybit, lev, keys)
-        
-        # Track active trade with sides for proper exit
-        ACTIVE_AUTO_TRADES[sym] = {
+        session.active_trades[sym] = {
             "entry_time": time.time(),
             "amount": per_trade_amt,
             "qty_binance": qty_binance,
             "qty_bybit": qty_bybit,
             "nft": best['nextFundingTime'],
             "sides": {"binance": side_binance, "bybit": side_bybit},
-            "keys": keys  # Store keys for exit
+            "keys": session.keys
         }
         
-        AUTO_TRADE_LOGS.append({
+        session.logs.append({
             "time": time.time(),
             "type": "ENTRY (FORCE)",
             "symbol": sym,
             "msg": f"BN:{side_binance} BB:{side_bybit} | Diff:{best['rate_diff']*100:.4f}%"
         })
         
-        return {
-            "status": "success", 
-            "symbol": sym, 
-            "binance_rate": best['binance_rate'],
-            "bybit_rate": best['bybit_rate'],
-            "diff": best['rate_diff'],
-            "direction": {"binance": side_binance, "bybit": side_bybit}
-        }
+        return {"status": "success", "symbol": sym}
         
     except Exception as e:
         print(f"Force Trade Logic Error: {e}")
-        import traceback
-        traceback.print_exc()
-        # The symbol might not be defined if the error occurs early
-        # This block is for error handling during force trade *entry*, not manual closure.
-        # If an error occurs, it means the trade likely didn't open successfully.
-        # Adding it to MANUAL_CLOSED_TRADES here might be semantically incorrect
-        # if the intention is for *successfully closed* manual trades.
-        # However, following the user's instruction faithfully:
-        if 'sym' in locals() and sym in ACTIVE_AUTO_TRADES:
-            # Remove from memory if it somehow got added before error
-            del ACTIVE_AUTO_TRADES[sym]
-            # Add to Cooldown (prevent immediate re-entry)
-            global MANUAL_CLOSED_TRADES
-            MANUAL_CLOSED_TRADES[sym] = time.time()
-            return {"status": "error", "symbol": sym, "message": f"Force trade failed: {str(e)}. Symbol added to cooldown."}
         return {"status": "error", "message": str(e)}
 
 @app.post("/api/auto-trade/force")
@@ -2198,19 +2373,15 @@ async def force_auto_trade(
     x_user_binance_key: Optional[str] = Header(None),
     x_user_binance_secret: Optional[str] = Header(None)
 ):
-    """
-    Forces an immediate execution of the best available trade opportunity.
-    Bypasses timing checks. Skips symbols with already open positions.
-    """
-    # Concurrency Lock to prevent double-execution
+    session = get_current_session(x_user_bybit_key, x_user_bybit_secret, x_user_binance_key, x_user_binance_secret)
+    if not session: return {"status": "error", "message": "Session not found"}
+
     if not hasattr(app.state, "trade_lock"):
          app.state.trade_lock = asyncio.Lock()
     
-    # Acquire Lock - wait if busy
     await app.state.trade_lock.acquire()
     try: 
-         print("Force Trade Triggered (Locked)")
-         return await _internal_force_trade_logic(x_user_bybit_key, x_user_bybit_secret, x_user_binance_key, x_user_binance_secret)
+         return await _internal_force_trade_logic(session)
     finally:
          if app.state.trade_lock.locked():
             app.state.trade_lock.release()
@@ -2228,127 +2399,81 @@ async def simulate_trade(
     x_user_binance_key: Optional[str] = Header(None),
     x_user_binance_secret: Optional[str] = Header(None)
 ):
-    """
-    Simulates a trade for a specific symbol:
-    1. Opens positions on both exchanges
-    2. Waits for exit_delay_seconds
-    3. Closes positions automatically
-    """
-    global AUTO_TRADE_LOGS, ACTIVE_AUTO_TRADES
-    
+    session = get_current_session(x_user_bybit_key, x_user_bybit_secret, x_user_binance_key, x_user_binance_secret)
+    if not session: return {"status": "error", "message": "Session not found"}
+
     symbol = request.symbol.upper().replace("USDT", "")
     exit_delay = request.exit_delay_seconds
     is_live = request.is_live
     
-    print(f"🎮 SIMULATE TRADE: {symbol} | Exit in {exit_delay}s ({exit_delay/60:.1f} min) | Mode: {'LIVE' if is_live else 'TESTNET'}")
-    
     try:
-        # 1. Fetch current rates to determine direction
         base_url = "https://fapi.binance.com" if is_live else "https://testnet.binancefuture.com"
         loop = asyncio.get_event_loop()
         r = await loop.run_in_executor(None, requests.get, f"{base_url}/fapi/v1/premiumIndex")
         data_binance = r.json()
         data_bybit_map = await fetch_bybit_rates(is_live=is_live)
         
-        # Find the symbol
         binance_item = next((x for x in data_binance if x['symbol'] == f"{symbol}USDT"), None)
         bybit_item = data_bybit_map.get(symbol)
         
         if not binance_item or not bybit_item:
-            return {"status": "error", "message": f"Symbol {symbol} not found on both exchanges"}
+            return {"status": "error", "message": f"Symbol {symbol} not found"}
         
         binance_rate = float(binance_item['lastFundingRate'])
         bybit_rate = bybit_item.get('rate', 0)
         mark_price = float(binance_item['markPrice'])
         
-        # 2. Determine direction (same logic as auto-trade)
-        # If Binance > Bybit: SHORT Binance, LONG Bybit (collect Binance funding)
-        # If Bybit > Binance: LONG Binance, SHORT Bybit (collect Bybit funding)
         if binance_rate > bybit_rate:
-            side_binance = "SELL"  # Short on Binance
-            side_bybit = "Buy"    # Long on Bybit
+            side_binance = "SELL" 
+            side_bybit = "Buy"    
         else:
-            side_binance = "BUY"   # Long on Binance  
-            side_bybit = "Sell"   # Short on Bybit
+            side_binance = "BUY"   
+            side_bybit = "Sell"   
         
-        # 3. Calculate quantity (Separate for Smart Entry)
-        investment = AUTO_TRADE_CONFIG["total_investment"] / AUTO_TRADE_CONFIG["max_trades"]
-        leverage = AUTO_TRADE_CONFIG["leverage"]
+        investment = session.config["total_investment"] / session.config["max_trades"]
+        leverage = session.config["leverage"]
         
-        qty_binance = (investment * leverage) / mark_price
-        qty_binance = round(qty_binance, 3)
-        
+        qty_binance = round((investment * leverage) / mark_price, 3)
         bybit_price = bybit_item.get('markPrice', mark_price)
-        qty_bybit = (investment * leverage) / bybit_price
-        qty_bybit = round(qty_bybit, 3)
+        qty_bybit = round((investment * leverage) / bybit_price, 3)
         
-        # 4. Log entry
-        log_entry = {
+        session.logs.append({
             "time": time.time(),
             "type": "SIM_ENTRY",
             "symbol": symbol,
-            "msg": f"Simulated Entry: BN={side_binance} BB={side_bybit} | QtyBN={qty_binance} QtyBB={qty_bybit} | Exit in {exit_delay/60:.1f}min"
-        }
-        AUTO_TRADE_LOGS.append(log_entry)
+            "msg": f"Simulated Entry: BN={side_binance} BB={side_bybit}"
+        })
         
-        # 5. Execute Entry (using existing scheduler)
-        keys = {
-            "bybit_key": x_user_bybit_key,
-            "bybit_secret": x_user_bybit_secret,
-            "binance_key": x_user_binance_key,
-            "binance_secret": x_user_binance_secret
-        }
+        await execute_auto_trade_entry(symbol, side_binance, side_bybit, qty_binance, qty_bybit, leverage, session.keys)
         
-        await execute_auto_trade_entry(symbol, side_binance, side_bybit, qty_binance, qty_bybit, leverage, keys)
-        
-        # 6. Track active trade
-        ACTIVE_AUTO_TRADES[symbol] = {
+        session.active_trades[symbol] = {
             "entry_time": time.time(),
             "qty_binance": qty_binance,
             "qty_bybit": qty_bybit,
             "sides": {"binance": side_binance, "bybit": side_bybit}
         }
         
-        # 7. Schedule exit after delay
         async def delayed_exit():
             await asyncio.sleep(exit_delay)
-            print(f"⏰ Auto-Exit triggered for {symbol} after {exit_delay}s")
-            
-            # Reverse sides for exit
             exit_binance = "BUY" if side_binance == "SELL" else "SELL"
             exit_bybit = "Sell" if side_bybit == "Buy" else "Buy"
             
-            await execute_auto_trade_exit(symbol, exit_binance, exit_bybit, qty_binance, qty_bybit, leverage, is_live)
+            await execute_auto_trade_exit(symbol, exit_binance, exit_bybit, qty_binance, qty_bybit, leverage, is_live, session)
             
-            # Log exit
-            exit_log = {
+            session.logs.append({
                 "time": time.time(),
                 "type": "SIM_EXIT",
                 "symbol": symbol,
-                "msg": f"Simulated Exit complete after {exit_delay/60:.1f}min"
-            }
-            AUTO_TRADE_LOGS.append(exit_log)
-            
-            # Remove from active
-            if symbol in ACTIVE_AUTO_TRADES:
-                del ACTIVE_AUTO_TRADES[symbol]
+                "msg": f"Simulated Exit complete"
+            })
+            if symbol in session.active_trades:
+                del session.active_trades[symbol]
         
         asyncio.create_task(delayed_exit())
         
-        return {
-            "status": "success",
-            "symbol": symbol,
-            "direction": f"BN:{side_binance} BB:{side_bybit}",
-            "qty_binance": qty_binance,
-            "qty_bybit": qty_bybit,
-            "exit_in_seconds": exit_delay,
-            "exit_in_minutes": round(exit_delay / 60, 1)
-        }
+        return {"status": "success", "symbol": symbol}
         
     except Exception as e:
-        print(f"Simulate Trade Error: {e}")
-        import traceback
-        traceback.print_exc()
         return {"status": "error", "message": str(e)}
 
 async def execute_auto_trade_entry(symbol, side_binance, side_bybit, qty_binance, qty_bybit, leverage, keys={}):
@@ -2356,18 +2481,13 @@ async def execute_auto_trade_entry(symbol, side_binance, side_bybit, qty_binance
     Triggers the entry logic via the TradeScheduler.
     """
     try:
-        # Create a wrapper that adds the task directly with explicit sides.
-        import uuid
-        task_id = str(uuid.uuid4())
-        
-        # Manually constructing params for logging/usage in internal order
-        params = {
+        scheduler_params = {
             "symbol": symbol,
             "qty_binance": qty_binance,
             "qty_bybit": qty_bybit,
             "leverage": leverage,
             "platform": "Both",
-            "direction": "Auto", 
+            "direction": "Auto",
             "bybit_side": side_bybit,
             "binance_side": side_binance,
             # Inject keys
@@ -2377,40 +2497,100 @@ async def execute_auto_trade_entry(symbol, side_binance, side_bybit, qty_binance
             "binance_secret": keys.get("binance_secret")
         }
         
+        # Key Check
+        if not keys.get("bybit_key") or not keys.get("binance_key"):
+            msg = f"❌ AUTO-ENTRY BLOCKED: Missing keys for {symbol}. (Bybit: {bool(keys.get('bybit_key'))}, Binance: {bool(keys.get('binance_key'))})"
+            print(msg)
+            try:
+                await manager.broadcast(json.dumps({"type": "error", "msg": msg}))
+            except:
+                pass
+            return
+
         print(f"Auto-Trade executing ENTRY for {symbol} (BN:{qty_binance} BB:{qty_bybit})")
         
         tasks = []
         # Bybit
-        tasks.append(scheduler._internal_place_order(symbol, side_bybit, qty_bybit, leverage, "BYBIT", params))
+        tasks.append(scheduler._internal_place_order(symbol, side_bybit, qty_bybit, leverage, "BYBIT", scheduler_params))
         # Binance 
-        tasks.append(scheduler._internal_place_order(symbol, side_binance, qty_binance, leverage, "BINANCE", params))
+        tasks.append(scheduler._internal_place_order(symbol, side_binance, qty_binance, leverage, "BINANCE", scheduler_params))
         
-        await asyncio.gather(*tasks)
+        # Run both in parallel and wait for both to finish (return_exceptions=True)
+        t_api_start = time.time()
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        t_api_end = time.time()
+        print(f"⚡ API Response Time (Entry): {int((t_api_end - t_api_start) * 1000)}ms")
+        
+        # results[0] = Bybit, results[1] = Binance
+        bybit_res = results[0]
+        binance_res = results[1]
+        
+        bybit_success = not isinstance(bybit_res, Exception) and bybit_res.get("status") == "success"
+        binance_success = not isinstance(binance_res, Exception) and binance_res.get("status") == "success"
+        
+        if bybit_success and binance_success:
+            return True # Perfect entry
+            
+        # SAFETY: If one side succeeded and the other failed, we MUST close the orphan side
+        if bybit_success and not binance_success:
+            # Extract error detail
+            error_detail = str(binance_res)
+            if isinstance(binance_res, dict) and "msg" in binance_res:
+                 error_detail = f"{binance_res.get('msg')} (Code: {binance_res.get('code')})"
+            elif isinstance(binance_res, Exception):
+                error_detail = str(binance_res)
+
+            rollback_msg = f"⚠️ ARB FAILED: Binance failed ({error_detail}), rolling back Bybit for {symbol}..."
+            print(rollback_msg)
+            try: await manager.broadcast(json.dumps({"type": "error", "msg": rollback_msg}))
+            except: pass
+            # Reverse Bybit order
+            close_side = "Sell" if side_bybit == "Buy" else "Buy"
+            await scheduler._internal_place_order(symbol, close_side, qty_bybit, leverage, "BYBIT", scheduler_params)
+            raise Exception(f"One-legged trade prevented (Binance failed: {error_detail})")
+            
+        if binance_success and not bybit_success:
+            # Extract error detail
+            error_detail = str(bybit_res)
+            if isinstance(bybit_res, dict) and "retMsg" in bybit_res:
+                 error_detail = f"{bybit_res.get('retMsg')} (Code: {bybit_res.get('retCode')})"
+            elif isinstance(bybit_res, Exception):
+                error_detail = str(bybit_res)
+
+            rollback_msg = f"⚠️ ARB FAILED: Bybit failed ({error_detail}), rolling back Binance for {symbol}..."
+            print(rollback_msg)
+            try: await manager.broadcast(json.dumps({"type": "error", "msg": rollback_msg}))
+            except: pass
+            # Reverse Binance order
+            close_side = "Sell" if side_binance == "Buy" else "Buy"
+            await scheduler._internal_place_order(symbol, close_side, qty_binance, leverage, "BINANCE", scheduler_params)
+            raise Exception(f"One-legged trade prevented (Bybit failed: {error_detail})")
+            
+        # If both failed
+        if isinstance(bybit_res, Exception): raise bybit_res
+        if isinstance(binance_res, Exception): raise binance_res
+        raise Exception("Arbitrage Entry Failed on both sides")
         
     except Exception as e:
-        print(f"Auto-Trade Entry Error: {e}")
+        err_msg = str(e)
+        if hasattr(e, "detail"):
+            err_msg = e.detail
+        print(f"Auto-Trade Entry Error Detail: {err_msg}")
+        try:
+            await manager.broadcast(json.dumps({"type": "error", "msg": f"❌ Entry Failed: {err_msg}"}))
+        except: pass
+        raise e
 
-async def execute_auto_trade_exit(symbol, side_binance, side_bybit, qty_binance, qty_bybit, leverage, is_live):
+async def execute_auto_trade_exit(symbol, side_binance, side_bybit, qty_binance, qty_bybit, leverage, is_live, session=None):
     """
     Exits the auto-trade positions and records history.
     """
-    # 1. Capture Entry Details
-    trade_info = ACTIVE_AUTO_TRADES.get(symbol)
-    
-    log_entry = {
-        "time": time.time(),
-        "type": "EXIT",
-        "symbol": symbol,
-        "msg": "Initiating Auto-Exit & Recording"
-    }
+    keys = session.keys if session else {}
     
     try:
         # --- CLOSE LOGIC ---
         close_side_binance = "Sell" if side_binance == "Buy" else "Buy"
         close_side_bybit = "Sell" if side_bybit == "Buy" else "Buy"
-        
-        # Execute orders (using collected keys if available)
-        keys = trade_info.get("keys", {}) if trade_info else AUTO_TRADE_CONFIG.get("keys", {})
         
         params = {
             "symbol": symbol,
@@ -2429,42 +2609,13 @@ async def execute_auto_trade_exit(symbol, side_binance, side_bybit, qty_binance,
         # Binance Close
         tasks.append(scheduler._internal_place_order(symbol, close_side_binance, qty_binance, leverage, "BINANCE", params))
         
+        t_api_start = time.time()
         await asyncio.gather(*tasks)
+        t_api_end = time.time()
+        print(f"⚡ API Response Time (Exit): {int((t_api_end - t_api_start) * 1000)}ms")
         
-        # --- RECORDING ---
-        if trade_info:
-            # Estimate Profit (Funding Fee) - Rough estimate
-            # Real PnL should be updated by a separate reconciliation process or by fetching filled order details
-            est_pnl = float(trade_info.get("amount", 0)) * 0.0001
-            
-            trade_record = {
-                "id": str(uuid.uuid4()),
-                "symbol": symbol,
-                "entry_time": trade_info.get("entry_time", time.time()),
-                "exit_time": time.time(),
-                "side_binance": side_binance,
-                "side_bybit": side_bybit,
-                "amount": trade_info.get("amount", 0),
-                "qty_binance": qty_binance,
-                "qty_bybit": qty_bybit,
-                "leverage": leverage,
-                "est_profit": est_pnl,
-                "realized_profit": 0, 
-                "status": "CLOSED"
-            }
-            
-            trade_manager.add_trade(trade_record)
-            print(f"✅ Trade Recorded: {symbol}")
-            
     except Exception as e:
         print(f"Auto-Exit Error: {e}")
-        log_entry["error"] = str(e)
-    
-    # Remove from active list
-    if symbol in ACTIVE_AUTO_TRADES:
-        del ACTIVE_AUTO_TRADES[symbol]
-    
-    AUTO_TRADE_LOGS.append(log_entry)
 
 
 
@@ -2476,17 +2627,10 @@ async def sync_auto_trade_positions(
     x_user_binance_secret: Optional[str] = Header(None),
     is_live: bool = False # Query param default, but frontend should send it
 ):
-    print(f"🔄 Manual Sync of Open Positions Triggered... (Live Mode: {is_live})")
-    global ACTIVE_AUTO_TRADES, AUTO_TRADE_LOGS
+    session = get_current_session(x_user_bybit_key, x_user_bybit_secret, x_user_binance_key, x_user_binance_secret)
+    if not session: return {"status": "error", "message": "Session not found"}
     
-    # Resolve keys
-    keys = {
-        "bybit_key": x_user_bybit_key or AUTO_TRADE_CONFIG["keys"].get("bybit_key"),
-        "bybit_secret": x_user_bybit_secret or AUTO_TRADE_CONFIG["keys"].get("bybit_secret"),
-        "binance_key": x_user_binance_key or AUTO_TRADE_CONFIG["keys"].get("binance_key"),
-        "binance_secret": x_user_binance_secret or AUTO_TRADE_CONFIG["keys"].get("binance_secret")
-    }
-    
+    keys = session.keys
     restored = []
     
     # --- BINANCE ---
@@ -2495,7 +2639,6 @@ async def sync_auto_trade_positions(
         if keys["binance_key"] and keys["binance_secret"]:
              api_key, api_secret = get_binance_credentials(keys["binance_key"], keys["binance_secret"])
              # Use is_live param effectively
-             is_testnet = not is_live
              base_url = "https://fapi.binance.com" if is_live else "https://testnet.binancefuture.com"
              
              # Fetch
@@ -2525,13 +2668,8 @@ async def sync_auto_trade_positions(
     try:
         if keys["bybit_key"] and keys["bybit_secret"]:
              api_key, api_secret = get_api_credentials(keys["bybit_key"], keys["bybit_secret"])
-             # BYBIT URL Logic
-             # Testnet: https://api-testnet.bybit.com
-             # Demo: https://api-demo.bybit.com (User reported issues, maybe try testnet if demo fails?)
-             # Live: https://api.bybit.com
              
              url_base = "https://api.bybit.com" if is_live else "https://api-testnet.bybit.com" 
-             # Use testnet.bybit.com for testnet as it's more standard than demo
              
              endpoint = "/v5/position/list"
              params = "category=linear&settleCoin=USDT&limit=200"
@@ -2558,8 +2696,6 @@ async def sync_auto_trade_positions(
                              "size": size,
                              "entryPrice": float(p['avgPrice'])
                          }
-             else:
-                  print(f"Bybit Sync Error Response: {data}")
     except Exception as e:
         print(f"Bybit Sync Error: {e}")
         
@@ -2570,13 +2706,13 @@ async def sync_auto_trade_positions(
         bn = binance_positions.get(sym)
         bb = bybit_positions.get(sym)
         
-        if sym not in ACTIVE_AUTO_TRADES:
+        if sym not in session.active_trades:
             # Reconstruct
             side_binance = bn['side'] if bn else "None"
             side_bybit = bb['side'] if bb else "None"
             qty = bn['amt'] if bn else (bb['size'] if bb else 0)
             
-            ACTIVE_AUTO_TRADES[sym] = {
+            session.active_trades[sym] = {
                 "entry_time": time.time(), 
                 "amount": qty * (bn['entryPrice'] if bn else 0), 
                 "qty": qty,
@@ -2589,19 +2725,18 @@ async def sync_auto_trade_positions(
     # Update NFT for restored
     if restored:
         try:
-             is_testnet = not AUTO_TRADE_CONFIG["is_live"] 
-             base_url = "https://fapi.binance.com" if not is_testnet else "https://testnet.binancefuture.com"
+             base_url = "https://fapi.binance.com" # Sync NFT from Live usually
              loop = asyncio.get_event_loop()
              r = await loop.run_in_executor(None, requests.get, f"{base_url}/fapi/v1/premiumIndex")
              data = r.json()
              for item in data:
                  s = item['symbol'].replace("USDT","")
-                 if s in ACTIVE_AUTO_TRADES:
-                      ACTIVE_AUTO_TRADES[s]["nft"] = int(item['nextFundingTime'])
+                 if s in session.active_trades:
+                      session.active_trades[s]["nft"] = int(item['nextFundingTime'])
         except: pass
 
     if restored:
-        AUTO_TRADE_LOGS.append({
+        session.logs.append({
             "time": time.time(),
             "type": "INFO",
             "symbol": "SYSTEM",
@@ -2611,7 +2746,7 @@ async def sync_auto_trade_positions(
     return {
         "status": "success", 
         "restored": restored, 
-        "active_count": len(ACTIVE_AUTO_TRADES)
+        "active_count": len(session.active_trades)
     }
 
 async def auto_trade_service():
@@ -2619,90 +2754,102 @@ async def auto_trade_service():
     Background loop for Auto-Trading.
     """
     print("🚀 Auto-Trade Service Started")
-    global PENDING_OPPORTUNITIES, ACTIVE_AUTO_TRADES, AUTO_TRADE_LOGS, MANUAL_CLOSED_TRADES
     
     while True:
         try:
-            # DEBUG
+            # 1. Fetch Rates (Fetch ONCE for all users to save API calls)
+            data_binance = []
+            data_bybit_map = {}
+            
             try:
-                with open("/Users/vats/Desktop/newBOt/debug_log.txt", "a") as f:
-                    f.write(f"[{datetime.datetime.now()}] LOOP START. Active: {AUTO_TRADE_CONFIG['active']}\n")
-            except: pass
-
-            # 1. Fetch Rates (Binance & Bybit for Price Diff)
-            try:
-                # FORCE LIVE DATA for Scanning (Paper Trading Mode support)
-                # We want to see real market opportunities (10:30 AM funding) even if we execute on Testnet.
                 base_url = "https://fapi.binance.com"
-                
                 loop = asyncio.get_event_loop()
-                
-                # Fetch Binance
                 r = await loop.run_in_executor(None, requests.get, f"{base_url}/fapi/v1/premiumIndex")
                 data_binance = r.json()
-
-                # Fetch Bybit
                 data_bybit_map = await fetch_bybit_rates(is_live=True)
-
             except Exception as e:
-                # Remove try wrapper to see if logging fails
-                with open("/Users/vats/Desktop/newBOt/debug_log.txt", "a") as f:
-                     f.write(f"[{time.time()}] DATA FETCH ERROR: {str(e)}\n")
-                
-                # print(f"AutoTrade Rate Fetch Error: {e}")
+                print(f"Global Data Fetch Error: {e}")
                 await asyncio.sleep(5)
                 continue
-
-            # 2. Analyze Candidates
+                
             now = time.time() * 1000
-            candidates = []
             
-            with open("/Users/vats/Desktop/newBOt/trace.log", "a") as f: f.write("STEP 6: Analyze\n")
+            # 2. Iterate over all Active Sessions
+            current_sessions = list(session_manager.sessions.values()) # Snapshot
+            
+            for session in current_sessions:
+                # Always scan to update pending_opportunities based on user config
+                    
+                # Analyze candidates for THIS session
+                candidates = []
+                
+                # Check for active trade exits (Timing checks)
+                for sym, info in list(session.active_trades.items()):
+                    pass
 
-            for item in data_binance:
-                if not item['symbol'].endswith('USDT'): continue
-                
-                symbol = item['symbol'].replace('USDT', '')
-                
-                if symbol in ACTIVE_AUTO_TRADES: continue # Skip active
-                
-                # Check Re-Entry Cooldown (5 mins)
-                if symbol in MANUAL_CLOSED_TRADES:
-                    if time.time() - MANUAL_CLOSED_TRADES[symbol] < 300: # 5 min cooldown
+                for item in data_binance:
+                    if not item['symbol'].endswith('USDT'): continue
+                    symbol = item['symbol'].replace('USDT', '')
+                    
+                    if symbol in session.active_trades: continue
+                    
+                    # Check Cooldowns
+                    if symbol in session.manual_closed_trades:
+                        if time.time() - session.manual_closed_trades[symbol] < 300:
+                            continue
+                        else:
+                            del session.manual_closed_trades[symbol]
+                    
+                    if symbol in session.failed_trades:
+                        if time.time() - session.failed_trades[symbol] < 120: # 2 min cooldown for failed entries
+                            continue
+                        else:
+                            del session.failed_trades[symbol]
+                    
+                    if symbol not in data_bybit_map: continue
+
+                    # Safety: Ensure symbol is present in our Binance cache (valid futures symbol)
+                    if symbol not in BINANCE_SYMBOL_INFO:
                         continue
-                    else:
-                        del MANUAL_CLOSED_TRADES[symbol] # Cleanup expired
-                
-                if symbol not in data_bybit_map: continue
-                
-                bybit_price = data_bybit_map[symbol]['markPrice']
-                bybit_rate = data_bybit_map[symbol].get('rate', 0)
-                bybit_nft = int(data_bybit_map[symbol].get('nextFundingTime', 0)) # Bybit returns ms string usually
+                    
+                    bybit_price = data_bybit_map[symbol]['markPrice']
+                    bybit_rate = data_bybit_map[symbol].get('rate', 0)
+                    bybit_nft = int(data_bybit_map[symbol].get('nextFundingTime', 0))
 
-                # 1. Filter Zero/Invalid Prices
-                if bybit_price == 0: continue
+                    if bybit_price == 0: continue
+                    
+                    try:
+                        binance_rate = float(item['lastFundingRate'])
+                        mark_price_binance = float(item['markPrice'])
+                        next_funding_binance = int(item['nextFundingTime'])
+                        
+                        if mark_price_binance == 0: continue
+                        
+                        # --- VALIDATION: Check for Invalid/Suspicious Rates ---
+                        is_invalid = False
+                        # High outlier or error codes (like -999)
+                        if abs(binance_rate) > 10 or abs(bybit_rate) > 10:
+                            is_invalid = True
+                        # Exact zero is usually an error/placeholder
+                        if binance_rate == 0 or bybit_rate == 0:
+                            is_invalid = True
+                        
+                        # Hard skip only if funding time is absolutely 0 (breaks logic)
+                        if next_funding_binance == 0 or bybit_nft == 0:
+                            continue
+                        # ----------------------------------------
 
-                try:
-                    binance_rate = float(item['lastFundingRate'])
-                    mark_price_binance = float(item['markPrice'])
-                    next_funding_binance = int(item['nextFundingTime'])
-                    
-                    if mark_price_binance == 0: continue
-
-                    # Calculate Rate Diff (Arbitrage Strength)
-                    rate_diff = abs(binance_rate - bybit_rate)
-                    
-                    # Calculate Price Diff %
-                    price_diff_pct = 0
-                    if mark_price_binance > 0:
-                        price_diff_pct = abs(mark_price_binance - bybit_price) / mark_price_binance * 100
-                    
-                    # Filter: Min Funding Diff & Max Price Diff
-                    min_diff_cfg = AUTO_TRADE_CONFIG["min_diff"]
-                    max_price_diff_cfg = AUTO_TRADE_CONFIG.get("max_price_diff", 2.0)
-                    
-                    if (rate_diff * 100) > min_diff_cfg:
-                        if price_diff_pct <= max_price_diff_cfg:
+                        rate_diff = abs(binance_rate - bybit_rate)
+                        
+                        price_diff_pct = 0
+                        if mark_price_binance > 0:
+                            price_diff_pct = abs(mark_price_binance - bybit_price) / mark_price_binance * 100
+                        
+                        min_diff_cfg = session.config["min_diff"]
+                        # Default max price diff to 2% if not set
+                        max_price_diff_cfg = session.config.get("max_price_diff", 2.0) 
+                        
+                        if (rate_diff * 100) > min_diff_cfg:
                             candidates.append({
                                 "symbol": symbol,
                                 "binance_rate": binance_rate,
@@ -2712,198 +2859,259 @@ async def auto_trade_service():
                                 "nextFundingTime": next_funding_binance,
                                 "nextFundingTimeBybit": bybit_nft,
                                 "priceDiff": price_diff_pct,
-                                "bybitPrice": bybit_price
+                                "bybitPrice": bybit_price,
+                                "is_invalid": is_invalid
                             })
-                        else:
-                            # logging for debugging why it was skipped
-                            if len(candidates) < 3: 
-                                print(f"DEBUG SKIP {symbol}: Price Diff {price_diff_pct:.2f}% > Max {max_price_diff_cfg}%")
-
-                except Exception as e: 
-                    print(f"Error processing candidate {symbol}: {e}")
-                    continue
-
-            # Sort by Time to Funding (Ascending) then Profit (Descending)
-            # We use the minimum of the two funding times as the primary "Time to Funding"
-            candidates.sort(key=lambda x: (min(x['nextFundingTime'], x['nextFundingTimeBybit'] if x['nextFundingTimeBybit'] > 0 else x['nextFundingTime']), -x['rate_diff']))
-            
-            try:
-                with open("/Users/vats/Desktop/newBOt/debug_log.txt", "a") as f:
-                    f.write(f"Candidates Found: {len(candidates)}\n")
-            except: pass
-            
-            PENDING_OPPORTUNITIES = candidates[:10] # Update global pending list
-            
-            top_candidates = candidates[:5]
-
-            # 3. Execute
-            # 3. Execute
-            # Start with top 50 candidates to ensure we don't miss matching coins
-            execution_candidates = candidates[:50]
-            
-            # Use 'ignore_timing' to bypass the funding window check
-            ignore_timing = AUTO_TRADE_CONFIG.get("ignore_timing", False)
-
-            for cand in execution_candidates:
-                symbol = cand['symbol']
-                nft = cand['nextFundingTime']
-                
-                # Timing Logic
-                time_to_funding = nft - now
-                entry_seconds = AUTO_TRADE_CONFIG.get("entry_before_seconds", 60)
-                window_ms = entry_seconds * 1000
-
-                # DEBUG TIMING
-                if len(execution_candidates) > 0 and symbol == execution_candidates[0]['symbol']:
-                     with open("/Users/vats/Desktop/newBOt/debug_log.txt", "a") as f:
-                         f.write(f"DEBUG {symbol}: TimeToFunding={time_to_funding}ms, Window={window_ms}ms (Config={entry_seconds}s), IgnoreTiming={ignore_timing}, ShouldEnter={ignore_timing or (time_to_funding > 10000 and time_to_funding <= window_ms)}\n")
-                
-                # Entry Condition: 
-                # 1. Within Window (10s < t < window)
-                # 2. OR Force Entry (Ignore Timing)
-                
-                should_enter = False
-                if ignore_timing:
-                     should_enter = True
-                elif 10000 < time_to_funding < window_ms:
-                     should_enter = True
-                     
-                if should_enter: 
-                    # 0. Check Active & Schedule
-                    if not AUTO_TRADE_CONFIG["active"]:
+                    except Exception as e:
+                        print(f"Error processing symbol {symbol}: {e}")
                         continue
 
-                    now_dt = datetime.datetime.now()
-                    current_time_str = now_dt.strftime("%H:%M")
-                    start_t = AUTO_TRADE_CONFIG.get("start_time", "00:00")
-                    end_t = AUTO_TRADE_CONFIG.get("end_time", "23:59")
+                # Sort by Time to Funding
+                candidates.sort(key=lambda x: (min(x['nextFundingTime'], x['nextFundingTimeBybit'] if x['nextFundingTimeBybit'] > 0 else x['nextFundingTime']), -x['rate_diff']))
+                
+                # Update Pending Opportunities (Always Visible)
+                session.pending_opportunities = candidates[:20] 
+                
+                
+                # --- EXECUTION CHECK ---
+                if not session.config["active"]:
+                    continue
+
+                # --- AUTO ENTRY EXECUTION ---
+                # If we recently hit a balance error, wait 30s before trying ANY auto-entries again
+                if (time.time() - session.last_balance_warning) < 30:
+                    continue
+                
+                # Gap between ANY two auto-entries (global session cooldown)
+                if (time.time() - session.last_entry_time) < 10:
+                    continue
+
+                execution_candidates = candidates[:30]
+                ignore_timing = session.config.get("ignore_timing", False)
+                entries_this_cycle = 0
+                
+                for cand in execution_candidates:
+                    if cand.get("is_invalid"):
+                        continue
                     
-                    if not (start_t <= current_time_str <= end_t):
-                        if start_t > end_t: # Overnight schedule
-                            if not (current_time_str >= start_t or current_time_str <= end_t):
-                                continue
-                        else:
-                            continue 
-                    
-                    # Check Max Trades
-                    if len(ACTIVE_AUTO_TRADES) >= AUTO_TRADE_CONFIG["max_trades"]: 
-                        # If we are clicking max trades, we could theoretically swap a lower profit trade for this one?
-                        # For simplicity, we just stop adding recent trades.
+                    # Limit entries per cycle strictly
+                    if entries_this_cycle >= 1:
                         break
-                        
-                    # Check API Keys availability
-                    keys = AUTO_TRADE_CONFIG.get("keys", {})
-                    has_keys = keys.get("bybit_key") and keys.get("binance_key")
 
-                    # LEVRAGE CHECK: Adjust to min available on exchanges
-                    target_leverage = AUTO_TRADE_CONFIG["leverage"]
-                    effective_leverage = await get_min_common_leverage(target_leverage, symbol, keys)
+                    symbol = cand['symbol']
                     
-                    if effective_leverage < target_leverage:
-                        print(f"⚠️ LEVERAGE ADJUSTED for {symbol}: Requested {target_leverage}x -> Max Available {effective_leverage}x")
+                    # Already failed recently?
+                    if symbol in session.failed_trades:
+                        if time.time() - session.failed_trades[symbol] < 120:
+                            continue
 
-                    # Calculate Amount (Split Quantity)
-                    per_trade_amt = AUTO_TRADE_CONFIG["total_investment"] / max(1, AUTO_TRADE_CONFIG["max_trades"])
+                    nft = cand['nextFundingTime']
                     
-                    qty_binance = (per_trade_amt * effective_leverage) / cand['markPrice']
-                    qty_binance = round(qty_binance, 3)
+                    time_to_funding = nft - now
+                    entry_seconds = session.config.get("entry_before_seconds", 60)
+                    window_ms = entry_seconds * 1000
                     
-                    qty_bybit = (per_trade_amt * effective_leverage) / cand['bybitPrice']
-                    qty_bybit = round(qty_bybit, 3)
+                    should_enter = False
+                    if ignore_timing:
+                         should_enter = True
+                    elif 10000 < time_to_funding < window_ms:
+                         should_enter = True
+                    
+                    if should_enter:
+                        # Safety Check: Enforce Max Price Diff for Auto-Execution
+                        if cand['priceDiff'] > session.config.get("max_price_diff", 2.0):
+                             continue
 
-                    # Determine Direction (Arbitrage Logic: Short High, Long Low)
-                    # If Binance > Bybit: Short Binance (Receive Funding), Long Bybit (Pay Low Funding) -> Net Positive
-                    # If Bybit > Binance: Short Bybit (Receive Funding), Long Binance (Pay Low Funding) -> Net Positive
-                    if cand['binance_rate'] > cand['bybit_rate']:
-                        side_binance = "Sell"
-                        side_bybit = "Buy"
-                    else:
-                        side_binance = "Buy"
-                        side_bybit = "Sell"
-                    
-                    
-                    if has_keys:
-                        print(f"🤖 Auto-Trade EXECUTE: {symbol} (Funding in {time_to_funding/1000:.1f}s) Amt:${per_trade_amt} Lev:{effective_leverage}x QtyBN:{qty_binance} QtyBB:{qty_bybit}")
+                        # Check Max Trades
+                        if len(session.active_trades) >= session.config["max_trades"]:
+                            break
                         
-                        # Execute Entry (Both Sides)
-                        await execute_auto_trade_entry(symbol, side_binance, side_bybit, qty_binance, qty_bybit, effective_leverage, keys)
+                        # Mark as entry intent identified
+                        session.last_entry_time = time.time()
+                        entries_this_cycle += 1
                         
-                        ACTIVE_AUTO_TRADES[symbol] = {
-                            "entry_time": time.time(),
-                            "amount": per_trade_amt,
-                            "nft": nft,
-                            "qty_binance": qty_binance,
-                            "qty_bybit": qty_bybit,
-                            "entry_price_binance": cand['markPrice'],
-                            "entry_price_bybit": cand['bybitPrice'],
-                            "leverage": effective_leverage,
-                            "sides": {"binance": side_binance, "bybit": side_bybit},
-                            "keys": keys
-                        }
+                        # Leverage
+                        target_leverage = session.config["leverage"]
+                        effective_leverage = await get_min_common_leverage(target_leverage, symbol, session.keys)
                         
-                        AUTO_TRADE_LOGS.append({
-                            "time": time.time(),
-                            "type": "ENTRY",
-                            "symbol": symbol,
-                            "msg": f"Auto Entry {side_binance}/{side_bybit} ({effective_leverage}x) | Time {time_to_funding/1000:.0f}s"
-                        })
-                    else:
-                        # Log missing keys error once per symbol/cycle?
-                        print(f"❌ Auto-Trade Skipped {symbol}: Missing API Keys")
+                        # Direction
+                        if cand['binance_rate'] > cand['bybit_rate']:
+                            side_binance = "Sell"
+                            side_bybit = "Buy"
+                        else:
+                            side_binance = "Buy"
+                            side_bybit = "Sell"
 
-        except Exception as e:
-            print(f"Auto-Trade Loop Error: {e}")
-        
-        # Check for Exits
-        try:
-            to_remove = []
-            to_remove = []
-            # Fix: Iterate over list of keys to avoid modification error during loop
-            for sym in list(ACTIVE_AUTO_TRADES.keys()):
-                data = ACTIVE_AUTO_TRADES.get(sym)
-                if not data: continue
-                # Exit Timing: exit_after_seconds AFTER funding
-                exit_delay_ms = AUTO_TRADE_CONFIG.get("exit_after_seconds", 30) * 1000
-                time_since_funding = (time.time() * 1000) - data["nft"]
-                
-                if time_since_funding > exit_delay_ms: 
-                    # Close Logic
-                    if AUTO_TRADE_CONFIG.get("auto_exit", True):
-                        print(f"🤖 Auto-Trade EXIT: {sym}")
+                        inv = session.config["total_investment"]
+                        per_trade_amt = inv / max(1, session.config["max_trades"])
                         
-                        sides = data.get("sides", {"binance": "Buy", "bybit": "Sell"}) # Default fallback
-                        keys = data.get("keys", AUTO_TRADE_CONFIG.get("keys", {}))
+                        qty_binance = round((per_trade_amt * effective_leverage) / cand['markPrice'], 3)
+                        qty_bybit = round((per_trade_amt * effective_leverage) / cand['bybitPrice'], 3)
                         
-                        # Retrieve quantities
-                        qty_bn = data.get("qty_binance", data.get("qty", 0))
-                        qty_bb = data.get("qty_bybit", data.get("qty", 0))
+                        # Execute
+                        user_prefix = f"[{session.user_id[:8]}] "
+                        exec_msg = f"🚀 {user_prefix}AUTO-ENTRY: {symbol} | BN: {side_binance} {qty_binance} | BB: {side_bybit} {qty_bybit}"
+                        print(exec_msg)
+                        try:
+                            await manager.broadcast(json.dumps({"type": "log", "msg": exec_msg, "color": "cyan"}))
+                        except:
+                            pass
+
+                        try:
+                            # TIMING START
+                            t_start = time.time()
+                            
+                            await execute_auto_trade_entry(symbol, side_binance, side_bybit, qty_binance, qty_bybit, effective_leverage, session.keys)
+                            
+                            # TIMING END
+                            t_end = time.time()
+                            duration_ms = int((t_end - t_start) * 1000)
+                            
+                            # Log Execution Time
+                            timing_msg = f"⏱️ TRADE EXECUTED in {duration_ms}ms"
+                            print(f"{user_prefix} {timing_msg}")
+                            session.logs.append({
+                                "time": time.time(),
+                                "type": "TIMING", 
+                                "symbol": symbol,
+                                "msg": timing_msg
+                            })
+
+                            session.active_trades[symbol] = {
+                                "entry_time": time.time(),
+                                "amount": per_trade_amt,
+                                "qty_binance": qty_binance,
+                                "qty_bybit": qty_bybit,
+                                "nft": nft,
+                                "sides": {"binance": side_binance, "bybit": side_bybit},
+                                "keys": session.keys
+                            }
+                            
+                            session.logs.append({
+                                "time": time.time(),
+                                "type": "ENTRY (AUTO)",
+                                "symbol": symbol,
+                                "msg": f"BN:{side_binance} BB:{side_bybit} | Diff:{cand['rate_diff']*100:.4f}%"
+                            })
+                            
+                            # Update record
+                            session.last_entry_time = time.time()
+                            entries_this_cycle += 1
+                            
+                            # Standard Delay
+                            await asyncio.sleep(3) 
+
+                            # Schedule Auto-Exit
+                            if session.config["auto_exit"]:
+                                exit_delay = session.config.get("exit_after_seconds", 30)
+                                
+                                if ignore_timing:
+                                    # When ignore_timing is ON, we entry IMMEDIATELY.
+                                    # The exit is just a quick scalp/test duration.
+                                    wait_seconds = exit_delay
+                                    schedule_reason = "Force/Test Mode (Immediate)"
+                                else:
+                                    # Standard funding-based timing
+                                    # We wait exactly until funding triggers, plus the configured seconds
+                                    wait_seconds = (time_to_funding / 1000) + exit_delay
+                                    schedule_reason = f"Funding Disbursal (+{exit_delay}s)"
+                                
+                                if wait_seconds < 1: wait_seconds = 1
+                                
+                                # Inform User of Schedule
+                                print(f"{user_prefix}🕒 Scheduled Auto-Exit in {wait_seconds:.1f}s | Reason: {schedule_reason}")
+                                
+                                async def scheduled_exit_task(s_symbol, s_wait, s_session): # Closure capture
+                                    await asyncio.sleep(s_wait)
+                                    # Check if still active
+                                    if s_symbol in s_session.active_trades:
+                                        trade = s_session.active_trades[s_symbol]
+                                        e_bin = "BUY" if trade['sides']['binance'] == "Sell" else "SELL"
+                                        e_byb = "Sell" if trade['sides']['bybit'] == "Buy" else "Buy"
+                                        
+                                        t_exit_start = time.time()
+                                        await execute_auto_trade_exit(s_symbol, e_bin, e_byb, trade['qty_binance'], trade['qty_bybit'], effective_leverage, s_session.config["is_live"], s_session)
+                                        t_exit_end = time.time()
+                                        dur_exit = int((t_exit_end - t_exit_start) * 1000)
+                                        
+                                        # Calculate Total Lifecycle Duration (Entry to Exit)
+                                        entry_time = trade.get('entry_time', t_exit_end)
+                                        total_duration = t_exit_end - entry_time
+                                        total_dur_str = f"{total_duration:.2f}s"
+
+                                        log_msg = f"Auto Exit after Funding ({dur_exit}ms API) | Total Held: {total_dur_str}"
+                                        print(f"{user_prefix}✅ {log_msg}")
+
+                                        s_session.logs.append({
+                                            "time": time.time(),
+                                            "type": "EXIT (AUTO)",
+                                            "symbol": s_symbol,
+                                            "msg": log_msg
+                                        })
+                                        if s_symbol in s_session.active_trades:
+                                            del s_session.active_trades[s_symbol]
+
+                                asyncio.create_task(scheduled_exit_task(symbol, wait_seconds, session))
                         
-                        await execute_auto_trade_exit(sym, sides["binance"], sides["bybit"], qty_bn, qty_bb, 10, True)
-                        
-                        AUTO_TRADE_LOGS.append({
-                            "time": time.time(),
-                            "type": "EXIT",
-                            "symbol": sym,
-                            "msg": "Auto-Exit Triggered"
-                        })
-                        to_remove.append(sym)
-                    else:
-                         # Manual Exit required, just remove from auto-tracking
-                         AUTO_TRADE_LOGS.append({
-                            "time": time.time(),
-                            "type": "INFO",
-                            "symbol": sym,
-                            "msg": "Auto-Exit Skipped (Manual Config)"
-                        })
-                         to_remove.append(sym)
+                        except Exception as e:
+                            # If ANY leg fails, we do NOT add it to active_trades mapping
+                            err_str = str(e).lower()
+                            curr_time = time.time()
+                            if "not enough" in err_str or "balance" in err_str or "110007" in err_str:
+                                # ALWAYS SHOW WARNING (Removed 30s throttle for immediate feedback as requested)
+                                balance_msg = "⚠️ INSUFFICIENT BALANCE: Ensure you have enough USDT in Bybit Unified and Binance Futures."
+                                print(f"{user_prefix}{balance_msg}")
+                                
+                                # Broadcast to frontend toast/log
+                                try:
+                                    await manager.broadcast(json.dumps({"type": "error", "msg": balance_msg}))
+                                except: pass
+                                
+                                # Also append to session logs so it stays in terminal
+                                session.logs.append({
+                                    "time": time.time(),
+                                    "type": "ERROR",
+                                    "symbol": symbol,
+                                    "msg": "Insufficient Balance (Trade Skipped)"
+                                })
+
+                                session.last_balance_warning = curr_time
+                                # Keep the cooldown to prevent spamming the exchange, not the user
+                            else:
+                                err_msg = str(e)
+                                if hasattr(e, "detail"): err_msg = e.detail
+                                print(f"❌ {user_prefix}FAILED TO OPEN ARBITRAGE FOR {symbol}: {err_msg}")
+                                session.failed_trades[symbol] = time.time() 
+                                session.last_entry_time = time.time() 
+                                entries_this_cycle += 1 
+                                
+                                # Auto-Deactivate on persistent key errors
+                                if "API Key is Invalid" in err_msg or "10003" in err_msg or "-2015" in err_msg:
+                                    session.config["active"] = False
+                                    session_manager.save_sessions()
+                                    session_manager.save_sessions()
+                                    deact_msg = f"🛑 {user_prefix}AUTO-TRADE DEACTIVATED: Invalid API keys or permissions."
+                                    print(deact_msg)
+                                    # Persist in session logs so frontend sees it on refresh
+                                    session.logs.append({
+                                        "time": time.time(),
+                                        "type": "ERROR",
+                                        "symbol": "SYSTEM",
+                                        "msg": "Auto-Deactivated: Invalid API Keys. Check settings."
+                                    })
+                                    try: await manager.broadcast(json.dumps({"type": "error", "msg": deact_msg}))
+                                    except: pass
+
+                                await asyncio.sleep(5) 
+                                break # Force stop this cycle for this session
+                            pass
+
+            await asyncio.sleep(1) # Loop Throttle
             
-            for sym in to_remove:
-                del ACTIVE_AUTO_TRADES[sym]
-                
         except Exception as e:
-            print(f"Auto-Trade Exit Check Error: {e}")
-        
-        await asyncio.sleep(5)
+            print(f"Service Loop Error: {e}")
+            await asyncio.sleep(5)
+
 
 
 @app.post("/api/verify-binance-keys")
@@ -3011,17 +3219,8 @@ async def verify_bybit_keys(
     except Exception as e:
         return {"valid": False, "error": str(e)}
 
-@app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(auto_trade_service())
 
-if __name__ == "__main__":
-    import uvicorn
-    import os
-    # Hugging Face Spaces uses port 7860 by default
-    port = int(os.getenv("PORT", 8000))
-    # Listen on all interfaces
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
+
 
 # --- TRADE PERSISTENCE & P&L MANAGER ---
 
@@ -3138,6 +3337,14 @@ async def get_pnl_history(limit: int = 50):
     # Return sorted by exit time desc
     sorted_history = sorted(trade_manager.history, key=lambda x: x.get("exit_time", 0), reverse=True)
     return sorted_history[:limit]
+
+if __name__ == "__main__":
+    import uvicorn
+    import os
+    # Hugging Face Spaces uses port 7860 by default
+    port = int(os.getenv("PORT", 8000))
+    # Listen on all interfaces
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
 
 
 

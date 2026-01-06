@@ -12,11 +12,28 @@ export function PnLPage() {
     const [loading, setLoading] = useState(true);
 
     // Helper to get backend URL (reused logic)
+    // Helper to get backend URL (reused logic with smart detection)
     const getBackendUrl = () => {
-        const defaultUrl = (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1")
+        const saved = localStorage.getItem("primary_backend_url");
+        const hostname = window.location.hostname;
+
+        // Check if we're on a local network IP
+        const isLocalNetworkIP = /^192\.168\.|^10\.|^172\.(1[6-9]|2\d|3[0-1])\./.test(hostname);
+
+        // If on local network IP, ALWAYS use local backend (primary)
+        if (isLocalNetworkIP) {
+            const localBackend = `http://${hostname}:8000`;
+            // Only use saved URL if it's also a local IP
+            if (saved && (saved.includes(hostname) || saved.includes("localhost") || saved.includes("127.0.0.1"))) {
+                return saved;
+            }
+            return localBackend;
+        }
+
+        const defaultUrl = (hostname === "localhost" || hostname === "127.0.0.1")
             ? "http://localhost:8000"
-            : "https://bianance-bot.onrender.com";
-        return localStorage.getItem("primary_backend_url") || defaultUrl;
+            : "https://newbot-apj2.onrender.com";
+        return saved || defaultUrl;
     };
 
     const fetchData = async () => {

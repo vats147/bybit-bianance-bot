@@ -32,10 +32,32 @@ export function DemoTradingModal({ isOpen, onClose, data }) {
     }, [capital, leverage, testQty, platform, realExecution]);
 
     // --- HOST HELPERS ---
+    // --- HOST HELPERS ---
     const getBackendUrl = () => {
-        const primary = localStorage.getItem("primary_backend_url") || "https://vats147-bianance-bot.hf.space";
-        const backup = localStorage.getItem("backup_backend_url");
-        return { primary, backup };
+        const savedPrimary = localStorage.getItem("primary_backend_url");
+        const savedBackup = localStorage.getItem("backup_backend_url");
+        const hostname = window.location.hostname;
+
+        // Check if we're on a local network IP
+        const isLocalNetworkIP = /^192\.168\.|^10\.|^172\.(1[6-9]|2\d|3[0-1])\./.test(hostname);
+
+        // If on local network IP, ALWAYS use local backend (primary)
+        if (isLocalNetworkIP) {
+            const localBackend = `http://${hostname}:8000`;
+            // Only use saved URL if it's also a local IP
+            if (savedPrimary && (savedPrimary.includes(hostname) || savedPrimary.includes("localhost") || savedPrimary.includes("127.0.0.1"))) {
+                return { primary: savedPrimary, backup: savedBackup };
+            }
+            return { primary: localBackend, backup: savedBackup };
+        }
+
+        if (hostname === "localhost" || hostname === "127.0.0.1") {
+            const primary = savedPrimary || "http://localhost:8000";
+            return { primary, backup: savedBackup };
+        }
+
+        const primary = savedPrimary || "https://newbot-apj2.onrender.com";
+        return { primary, backup: savedBackup };
     };
 
     // --- BACKEND SCHEDULER POLLING ---
@@ -388,6 +410,15 @@ export function DemoTradingModal({ isOpen, onClose, data }) {
         setSchedulerStatus("IDLE");
     };
 
+    const handleQuickTest = () => {
+        // Set time to Now + 15s (give user 5s to click Arm)
+        const now = new Date();
+        now.setSeconds(now.getSeconds() + 15);
+        const iso = new Date(now.getTime() - (now.getTimezoneOffset() * 60000)).toISOString().slice(0, 16);
+        setScheduledTime(iso);
+        setAutoSellDelay(30); // 30s exit delay as requested
+    };
+
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm animate-in fade-in zoom-in-95 duration-200">
             <div className="relative w-full max-w-lg mx-4">
@@ -429,6 +460,12 @@ export function DemoTradingModal({ isOpen, onClose, data }) {
 
                             {scheduleMode && (
                                 <div className="p-4 space-y-4 animate-in slide-in-from-top-2">
+                                    <div className="flex justify-between items-center bg-yellow-500/10 p-2 rounded border border-yellow-500/20">
+                                        <span className="text-[10px] text-yellow-600 font-mono">DEV: Simulate Trade</span>
+                                        <Button variant="outline" size="sm" className="h-6 text-[10px] border-yellow-500/50 text-yellow-600 hover:bg-yellow-100" onClick={handleQuickTest}>
+                                            ⚡ Set Quick Test (T+15s)
+                                        </Button>
+                                    </div>
                                     <div className="grid grid-cols-2 gap-4">
                                         <div className="space-y-1">
                                             <label className="text-xs font-semibold flex items-center gap-1"><Play className="h-3 w-3" /> Entry Time</label>

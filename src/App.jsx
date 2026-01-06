@@ -19,14 +19,33 @@ import { cn } from "@/lib/utils";
 // --- API Helpers ---
 
 const getBackendUrl = () => {
-  // Default to localhost for local dev if not set
-  const defaultUrl = (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1")
-    ? "http://localhost:8000"
-    : "https://bianance-bot.onrender.com";
+  // Smart detection: if accessed via IP or non-localhost, use same host with port 8000
+  const hostname = window.location.hostname;
+  const savedPrimary = localStorage.getItem("primary_backend_url");
+  const savedBackup = localStorage.getItem("backup_backend_url");
 
-  const primary = localStorage.getItem("primary_backend_url") || defaultUrl;
-  const backup = localStorage.getItem("backup_backend_url");
-  return { primary, backup };
+  // Check if we're on a local network IP
+  const isLocalNetworkIP = /^192\.168\.|^10\.|^172\.(1[6-9]|2\d|3[0-1])\./.test(hostname);
+
+  // If on local network IP, ALWAYS use local backend (ignore saved cloud URLs)
+  if (isLocalNetworkIP) {
+    const localBackend = `http://${hostname}:8000`;
+    // Only use saved URL if it's also a local IP, not a cloud URL
+    if (savedPrimary && (savedPrimary.includes(hostname) || savedPrimary.includes("localhost") || savedPrimary.includes("127.0.0.1"))) {
+      return { primary: savedPrimary, backup: savedBackup };
+    }
+    return { primary: localBackend, backup: savedBackup };
+  }
+
+  // Local development
+  if (hostname === "localhost" || hostname === "127.0.0.1") {
+    const primary = savedPrimary || "http://localhost:8000";
+    return { primary, backup: savedBackup };
+  }
+
+  // Production/external - use saved or default cloud backend
+  const primary = savedPrimary || "https://newbot-apj2.onrender.com";
+  return { primary, backup: savedBackup };
 };
 
 const fetchRatesWithFailover = async (isLive) => {
@@ -181,9 +200,11 @@ function App() {
         if (data.config) {
           setGlobalAutoTrade(data.config.active);
         }
+        return true;
       }
+      return false;
     } catch (e) {
-      console.error("Failed to fetch global auto-trade status", e);
+      return false;
     }
   };
 
@@ -235,9 +256,31 @@ function App() {
   };
 
   useEffect(() => {
-    fetchGlobalAutoTradeStatus();
-    const interval = setInterval(fetchGlobalAutoTradeStatus, 5000); // Poll status
-    return () => clearInterval(interval);
+    let timeoutId;
+    let isMounted = true;
+    let errorCount = 0;
+
+    const poll = async () => {
+      const success = await fetchGlobalAutoTradeStatus();
+      if (!isMounted) return;
+
+      let delay = 5000;
+      if (!success) {
+        errorCount++;
+        // Backoff: 5s, 10s, 20s, 40s, 60s(max)
+        delay = Math.min(5000 * Math.pow(2, errorCount), 60000);
+        console.log(`Backend status unavailable. Backoff: ${delay / 1000}s`);
+      } else {
+        errorCount = 0;
+      }
+      timeoutId = setTimeout(poll, delay);
+    };
+
+    poll();
+    return () => {
+      isMounted = false;
+      clearTimeout(timeoutId);
+    };
   }, []);
 
   // --- LIVE MODE STATE ---
@@ -262,26 +305,37 @@ function App() {
   const [autoTradeSymbols, setAutoTradeSymbols] = useState(new Set());
 
   // Load telegram config and auto-trade symbols from localStorage
+  // Load telegram config and auto-trade symbols from localStorage
   useEffect(() => {
-    const isLocal = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
+    const hostname = window.location.hostname;
+    // Expanded isLocal check to include network IPs
+    const isLocal = hostname === "localhost" ||
+      hostname === "127.0.0.1" ||
+      /^192\.168\.|^10\.|^172\.(1[6-9]|2\d|3[0-1])\./.test(hostname);
 
     // Enforcement: 
     // 1. Production -> Render
-    // 2. Local -> localhost:8000 (preferred over 127.0.0.1 for CORS consistency)
-    const targetProdUrl = "https://bianance-bot.onrender.com";
+    // 2. Local -> localhost:8000 or network IP
+    const targetProdUrl = "https://newbot-apj2.onrender.com";
     const currentPrimary = localStorage.getItem("primary_backend_url");
 
     if (!isLocal && currentPrimary !== targetProdUrl) {
       console.log(`Enforcing PROD backend URL: ${currentPrimary} -> ${targetProdUrl}`);
       localStorage.setItem("primary_backend_url", targetProdUrl);
     } else if (isLocal) {
-      // If local, ensure we point to localhost:8000 by default if it's currently 127.0.0.1 or empty
-      if (!currentPrimary || currentPrimary.includes("127.0.0.1")) {
+      // If strictly localhost (dev machine)
+      if ((hostname === "localhost" || hostname === "127.0.0.1") && (!currentPrimary || currentPrimary.includes("127.0.0.1") || currentPrimary.includes("onrender"))) {
         console.log(`Enforcing LOCAL backend URL: ${currentPrimary} -> http://localhost:8000`);
         localStorage.setItem("primary_backend_url", "http://localhost:8000");
       }
+      // If network IP, clear improper cloud urls to allow auto-detection
+      else if (currentPrimary && currentPrimary.includes("onrender.com")) {
+        console.log("Clearing PROD URL from local session to allow auto-detection");
+        localStorage.removeItem("primary_backend_url");
+      }
     }
 
+    // Load saved config
     const savedToken = localStorage.getItem("telegram_token") || '';
     const savedChatId = localStorage.getItem("telegram_chat_id") || '';
     setTelegramConfig({ token: savedToken, chatId: savedChatId });
@@ -1015,7 +1069,7 @@ function App() {
     const bybitSecret = localStorage.getItem("user_bybit_secret");
     const binanceKey = localStorage.getItem("user_binance_key");
     const binanceSecret = localStorage.getItem("user_binance_secret");
-    const backendUrl = localStorage.getItem("primary_backend_url") || "http://127.0.0.1:8000";
+    const { primary: backendUrl } = getBackendUrl();
 
     try {
       const res = await fetch(`${backendUrl}/api/close-all-positions`, {
@@ -1329,137 +1383,146 @@ function App() {
                         </TableCell>
                       </TableRow>
                     ) : (
-                      paginatedData.map((item) => (
-                        <TableRow key={item.symbol} className="hover:bg-muted/30">
-                          <TableCell className="font-bold sticky left-0 z-10 bg-background shadow-[1px_0_5px_rgba(0,0,0,0.05)] border-r">
-                            <div className="flex items-center gap-2">
-                              {autoTradeSymbols.has(item.symbol) && (
-                                <Zap className="w-4 h-4 text-yellow-500 animate-pulse" title="Auto-Trade Enabled" />
-                              )}
-                              <img
-                                src={`https://raw.githubusercontent.com/spothq/cryptocurrency-icons/master/128/color/${item.symbol.toLowerCase()}.png`}
-                                alt={item.symbol}
-                                className="w-6 h-6 rounded-full bg-white"
-                                onError={(e) => {
-                                  e.target.onerror = null;
-                                  e.target.src = `https://ui-avatars.com/api/?name=${item.symbol}&background=F3BA2F&color=fff&size=64&font-size=0.4&bold=true`;
-                                }}
-                              />
-                              <span className="text-foreground">{item.symbol}</span>
-                            </div>
-                          </TableCell>
-
-                          {/* Live Prices Column */}
-                          <TableCell className="font-mono text-xs">
-                            <div className="flex flex-col gap-0.5">
-                              <span className="text-muted-foreground">BN: <span className="text-foreground">${item.markPrice ? item.markPrice.toFixed(4) : '0.00'}</span></span>
-                              <span className="text-muted-foreground">BB: <span className="text-foreground">${item.bybitPrice ? item.bybitPrice.toFixed(4) : '0.00'}</span></span>
-                            </div>
-                          </TableCell>
-
-                          <TableCell className="font-mono text-xs text-muted-foreground">
-                            {(() => {
-                              if (!item.nextFundingTime) return '-';
-                              const diff = item.nextFundingTime - Date.now();
-                              if (diff <= 0) return 'Now';
-                              const h = Math.floor(diff / (1000 * 60 * 60));
-                              const m = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
-
-                              return (
-                                <div className="flex flex-col">
-                                  <span className="text-xs font-mono font-bold text-foreground">{h}h {m}m</span>
-                                  <span className="text-[9px] text-muted-foreground font-semibold uppercase leading-tight">
-                                    Bn: {item.binanceInterval || 8}h | Bb: {item.bybitInterval || 8}h
-                                  </span>
-                                </div>
-                              );
-                            })()}
-                          </TableCell>
-                          <TableCell className={cn("text-right font-medium relative", item.binanceRate > 0 ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400")}>
-                            {item.binanceRate !== -999 ? (item.binanceRate * 100).toFixed(4) + '%' : '-'}
-                            {item.bnDelta && (
-                              <span className={cn(
-                                "absolute top-1 right-1 text-[8px] transform transition-all duration-500",
-                                item.bnDelta === 'up' ? "text-green-500" : "text-red-500"
-                              )}>
-                                {item.bnDelta === 'up' ? '▲' : '▼'}
-                              </span>
+                      paginatedData.map((item) => {
+                        const isInvalid = !item.binanceRate || !item.bybitRate || item.binanceRate === 0 || item.bybitRate === 0 || Math.abs(item.binanceRate) > 10 || Math.abs(item.bybitRate) > 10;
+                        return (
+                          <TableRow
+                            key={item.symbol}
+                            className={cn(
+                              "hover:bg-muted/30 transition-all",
+                              isInvalid && "opacity-30 grayscale pointer-events-none cursor-not-allowed bg-muted/10"
                             )}
-                          </TableCell>
-                          <TableCell className={cn("text-right font-medium relative", item.bybitRate > 0 ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400")}>
-                            {item.bybitRate !== -999 ? (item.bybitRate * 100).toFixed(4) + '%' : '-'}
-                            {item.bbDelta && (
-                              <span className={cn(
-                                "absolute top-1 right-1 text-[8px] transform transition-all duration-500",
-                                item.bbDelta === 'up' ? "text-green-500" : "text-red-500"
-                              )}>
-                                {item.bbDelta === 'up' ? '▲' : '▼'}
-                              </span>
-                            )}
-                          </TableCell>
-                          <TableCell className={cn("text-right font-bold", item.diff > 0 ? "text-green-600 dark:text-green-400" : item.diff < 0 ? "text-red-600 dark:text-red-400" : "text-muted-foreground")}>
-                            {item.diff !== -999 ? (item.diff > 0 ? '+' : '') + (item.diff * 100).toFixed(4) + '%' : '-'}
-                          </TableCell>
-
-                          {/* Absolute Diff Percentage */}
-                          <TableCell className="text-right font-black bg-muted/10">
-                            {(Math.abs(item.diff) * 100).toFixed(4)}%
-                          </TableCell>
-                          <TableCell className="text-right font-bold text-blue-600 dark:text-blue-400">
-                            {item.apr.toFixed(2)}%
-                          </TableCell>
-                          <TableCell className="text-right sticky right-0 z-10 bg-background shadow-[-1px_0_5px_rgba(0,0,0,0.05)] border-l">
-                            <div className="flex justify-end gap-1">
-                              <Tooltip content={
-                                (Math.abs(item.binanceRate) === 0 || Math.abs(item.bybitRate) === 0)
-                                  ? "Trade Locked: 0% Rate detected"
-                                  : "Open Trade Panel"
-                              } side="top">
-                                <Button
-                                  size="sm"
-                                  className={cn(
-                                    "h-8 font-bold px-2 sm:px-3 shadow-sm border",
-                                    (Math.abs(item.binanceRate) === 0 || Math.abs(item.bybitRate) === 0)
-                                      ? "bg-gray-500/20 text-gray-500 border-gray-500/30 cursor-not-allowed"
-                                      : "bg-blue-600 hover:bg-blue-700 text-white border-blue-500/50"
-                                  )}
-                                  onClick={() => setSelectedOpportunity(item)}
-                                  disabled={Math.abs(item.binanceRate) === 0 || Math.abs(item.bybitRate) === 0}
-                                >
-                                  Trade
-                                </Button>
-                              </Tooltip>
-                              <Tooltip content="Open Binance Futures" side="top">
-                                <Button size="icon" variant="outline" className="h-8 w-8 p-0 border-yellow-500/50 hover:bg-yellow-500/10" asChild>
-                                  <a href={`https://www.binance.com/en/futures/${item.symbol}USDT`} target="_blank" rel="noopener noreferrer">
-                                    <img src="https://bin.bnbstatic.com/static/images/common/favicon.ico" alt="Binance" className="w-4 h-4" />
-                                  </a>
-                                </Button>
-                              </Tooltip>
-                              <Tooltip content="Open Bybit" side="top">
-                                <Button size="icon" variant="outline" className="h-8 w-8 p-0 border-purple-500/50 hover:bg-purple-500/10" asChild>
-                                  <a href={`https://www.bybit.com/trade/usdt/${item.symbol}USDT`} target="_blank" rel="noopener noreferrer">
-                                    <img src="https://www.bybit.com/favicon.ico" alt="Bybit" className="w-4 h-4" />
-                                  </a>
-                                </Button>
-                              </Tooltip>
-                              <Tooltip content="Open Both Exchanges" side="top">
-                                <Button
-                                  size="icon"
-                                  variant="outline"
-                                  className="h-8 w-8 p-0 border-green-500/50 hover:bg-green-500/10"
-                                  onClick={() => {
-                                    window.open(`https://www.binance.com/en/futures/${item.symbol}USDT`, '_blank');
-                                    window.open(`https://www.bybit.com/trade/usdt/${item.symbol}USDT`, '_blank');
+                          >
+                            <TableCell className="font-bold sticky left-0 z-10 bg-background shadow-[1px_0_5px_rgba(0,0,0,0.05)] border-r">
+                              <div className="flex items-center gap-2">
+                                {autoTradeSymbols.has(item.symbol) && (
+                                  <Zap className="w-4 h-4 text-yellow-500 animate-pulse" title="Auto-Trade Enabled" />
+                                )}
+                                <img
+                                  src={`https://raw.githubusercontent.com/spothq/cryptocurrency-icons/master/128/color/${item.symbol.toLowerCase()}.png`}
+                                  alt={item.symbol}
+                                  className="w-6 h-6 rounded-full bg-white"
+                                  onError={(e) => {
+                                    e.target.onerror = null;
+                                    e.target.src = `https://ui-avatars.com/api/?name=${item.symbol}&background=F3BA2F&color=fff&size=64&font-size=0.4&bold=true`;
                                   }}
-                                >
-                                  <ExternalLink className="h-4 w-4" />
-                                </Button>
-                              </Tooltip>
-                            </div>
-                          </TableCell>
-                        </TableRow>
-                      ))
+                                />
+                                <span className="text-foreground">{item.symbol}</span>
+                              </div>
+                            </TableCell>
+
+                            {/* Live Prices Column */}
+                            <TableCell className="font-mono text-xs">
+                              <div className="flex flex-col gap-0.5">
+                                <span className="text-muted-foreground">BN: <span className="text-foreground">${item.markPrice ? item.markPrice.toFixed(4) : '0.00'}</span></span>
+                                <span className="text-muted-foreground">BB: <span className="text-foreground">${item.bybitPrice ? item.bybitPrice.toFixed(4) : '0.00'}</span></span>
+                              </div>
+                            </TableCell>
+
+                            <TableCell className="font-mono text-xs text-muted-foreground">
+                              {(() => {
+                                if (!item.nextFundingTime) return '-';
+                                const diff = item.nextFundingTime - Date.now();
+                                if (diff <= 0) return 'Now';
+                                const h = Math.floor(diff / (1000 * 60 * 60));
+                                const m = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+
+                                return (
+                                  <div className="flex flex-col">
+                                    <span className="text-xs font-mono font-bold text-foreground">{h}h {m}m</span>
+                                    <span className="text-[9px] text-muted-foreground font-semibold uppercase leading-tight">
+                                      Bn: {item.binanceInterval || 8}h | Bb: {item.bybitInterval || 8}h
+                                    </span>
+                                  </div>
+                                );
+                              })()}
+                            </TableCell>
+                            <TableCell className={cn("text-right font-medium relative", item.binanceRate > 0 ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400")}>
+                              {item.binanceRate !== -999 ? (item.binanceRate * 100).toFixed(4) + '%' : '-'}
+                              {item.bnDelta && (
+                                <span className={cn(
+                                  "absolute top-1 right-1 text-[8px] transform transition-all duration-500",
+                                  item.bnDelta === 'up' ? "text-green-500" : "text-red-500"
+                                )}>
+                                  {item.bnDelta === 'up' ? '▲' : '▼'}
+                                </span>
+                              )}
+                            </TableCell>
+                            <TableCell className={cn("text-right font-medium relative", item.bybitRate > 0 ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400")}>
+                              {item.bybitRate !== -999 ? (item.bybitRate * 100).toFixed(4) + '%' : '-'}
+                              {item.bbDelta && (
+                                <span className={cn(
+                                  "absolute top-1 right-1 text-[8px] transform transition-all duration-500",
+                                  item.bbDelta === 'up' ? "text-green-500" : "text-red-500"
+                                )}>
+                                  {item.bbDelta === 'up' ? '▲' : '▼'}
+                                </span>
+                              )}
+                            </TableCell>
+                            <TableCell className={cn("text-right font-bold", item.diff > 0 ? "text-green-600 dark:text-green-400" : item.diff < 0 ? "text-red-600 dark:text-red-400" : "text-muted-foreground")}>
+                              {item.diff !== -999 ? (item.diff > 0 ? '+' : '') + (item.diff * 100).toFixed(4) + '%' : '-'}
+                            </TableCell>
+
+                            {/* Absolute Diff Percentage */}
+                            <TableCell className="text-right font-black bg-muted/10">
+                              {(Math.abs(item.diff) * 100).toFixed(4)}%
+                            </TableCell>
+                            <TableCell className="text-right font-bold text-blue-600 dark:text-blue-400">
+                              {item.apr.toFixed(2)}%
+                            </TableCell>
+                            <TableCell className="text-right sticky right-0 z-10 bg-background shadow-[-1px_0_5px_rgba(0,0,0,0.05)] border-l">
+                              <div className="flex justify-end gap-1">
+                                <Tooltip content={
+                                  (Math.abs(item.binanceRate) === 0 || Math.abs(item.bybitRate) === 0)
+                                    ? "Trade Locked: 0% Rate detected"
+                                    : "Open Trade Panel"
+                                } side="top">
+                                  <Button
+                                    size="sm"
+                                    className={cn(
+                                      "h-8 font-bold px-2 sm:px-3 shadow-sm border",
+                                      (Math.abs(item.binanceRate) === 0 || Math.abs(item.bybitRate) === 0)
+                                        ? "bg-gray-500/20 text-gray-500 border-gray-500/30 cursor-not-allowed"
+                                        : "bg-blue-600 hover:bg-blue-700 text-white border-blue-500/50"
+                                    )}
+                                    onClick={() => setSelectedOpportunity(item)}
+                                    disabled={Math.abs(item.binanceRate) === 0 || Math.abs(item.bybitRate) === 0}
+                                  >
+                                    Trade
+                                  </Button>
+                                </Tooltip>
+                                <Tooltip content="Open Binance Futures" side="top">
+                                  <Button size="icon" variant="outline" className="h-8 w-8 p-0 border-yellow-500/50 hover:bg-yellow-500/10" asChild>
+                                    <a href={`https://www.binance.com/en/futures/${item.symbol}USDT`} target="_blank" rel="noopener noreferrer">
+                                      <img src="https://bin.bnbstatic.com/static/images/common/favicon.ico" alt="Binance" className="w-4 h-4" />
+                                    </a>
+                                  </Button>
+                                </Tooltip>
+                                <Tooltip content="Open Bybit" side="top">
+                                  <Button size="icon" variant="outline" className="h-8 w-8 p-0 border-purple-500/50 hover:bg-purple-500/10" asChild>
+                                    <a href={`https://www.bybit.com/trade/usdt/${item.symbol}USDT`} target="_blank" rel="noopener noreferrer">
+                                      <img src="https://www.bybit.com/favicon.ico" alt="Bybit" className="w-4 h-4" />
+                                    </a>
+                                  </Button>
+                                </Tooltip>
+                                <Tooltip content="Open Both Exchanges" side="top">
+                                  <Button
+                                    size="icon"
+                                    variant="outline"
+                                    className="h-8 w-8 p-0 border-green-500/50 hover:bg-green-500/10"
+                                    onClick={() => {
+                                      window.open(`https://www.binance.com/en/futures/${item.symbol}USDT`, '_blank');
+                                      window.open(`https://www.bybit.com/trade/usdt/${item.symbol}USDT`, '_blank');
+                                    }}
+                                  >
+                                    <ExternalLink className="h-4 w-4" />
+                                  </Button>
+                                </Tooltip>
+                              </div>
+                            </TableCell>
+                          </TableRow>
+                        )
+                      })
                     )}
                   </TableBody>
                 </Table>
