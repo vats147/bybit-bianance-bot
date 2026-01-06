@@ -8,6 +8,7 @@ def check_river_funding():
     
     print(f"--- Checking {symbol} Funding Info ---")
     
+    
     # 1. Binance
     try:
         url = "https://fapi.binance.com/fapi/v1/premiumIndex"
