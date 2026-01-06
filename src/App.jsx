@@ -5,12 +5,13 @@ import { DemoTradingModal } from "./components/DemoTradingModal";
 import { DashboardPage } from "./components/DashboardPage";
 import { AutoTradePage } from "./components/AutoTradePage";
 import { SettingsPage } from "./components/SettingsPage";
+import { PnLPage } from "./components/PnLPage";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
-import { ArrowUpDown, ExternalLink, RefreshCw, Settings, AlertTriangle, LayoutDashboard, Activity, Zap } from "lucide-react";
+import { ArrowUpDown, ExternalLink, RefreshCw, Settings, AlertTriangle, LayoutDashboard, Activity, Zap, History } from "lucide-react";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useToast } from "@/components/ui/toast";
 import { cn } from "@/lib/utils";
@@ -159,12 +160,85 @@ const fetchCoinSwitchRates = async () => {
 
 // --- Main Component ---
 
+
+
 function App() {
   const toast = useToast();
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(true);
   const [lastUpdated, setLastUpdated] = useState(null);
-  const [currentTab, setCurrentTab] = useState("scanner"); // 'scanner', 'dashboard', 'settings'
+  const [currentTab, setCurrentTab] = useState("scanner"); // 'scanner', 'dashboard', 'settings', 'pnl'
+
+  // --- GLOBAL AUTO TRADE STATE ---
+  const [globalAutoTrade, setGlobalAutoTrade] = useState(false);
+
+  const fetchGlobalAutoTradeStatus = async () => {
+    try {
+      const { primary } = getBackendUrl();
+      const res = await fetch(`${primary}/api/auto-trade/status`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.config) {
+          setGlobalAutoTrade(data.config.active);
+        }
+      }
+    } catch (e) {
+      console.error("Failed to fetch global auto-trade status", e);
+    }
+  };
+
+  const toggleGlobalAutoTrade = async () => {
+    try {
+      const { primary } = getBackendUrl();
+      const newState = !globalAutoTrade;
+
+      // Optimistic update
+      setGlobalAutoTrade(newState);
+
+      // Step 1: Fetch current to ensure we don't overwrite
+      const statusRes = await fetch(`${primary}/api/auto-trade/status`);
+      const statusData = await statusRes.json();
+      const currentConfig = statusData.config;
+
+      // Step 2: Update
+      const updatedConfig = { ...currentConfig, active: newState };
+
+      // Keys needed for update
+      const headers = { "Content-Type": "application/json" };
+      const bKey = localStorage.getItem("user_binance_key");
+      const bSecret = localStorage.getItem("user_binance_secret");
+      const cKey = localStorage.getItem("user_bybit_key");
+      const cSecret = localStorage.getItem("user_bybit_secret");
+
+      if (bKey) headers["X-User-Binance-Key"] = bKey;
+      if (bSecret) headers["X-User-Binance-Secret"] = bSecret;
+      if (cKey) headers["X-User-Bybit-Key"] = cKey;
+      if (cSecret) headers["X-User-Bybit-Secret"] = cSecret;
+
+      await fetch(`${primary}/api/auto-trade/config`, {
+        method: "POST",
+        headers: headers,
+        body: JSON.stringify(updatedConfig)
+      });
+
+      toast.toast({
+        title: newState ? "Auto-Bet STARTED 🚀" : "Auto-Bet STOPPED 🛑",
+        description: newState ? "Bot is now scanning matching funding times." : "Bot execution paused.",
+        variant: newState ? "default" : "destructive"
+      });
+
+    } catch (e) {
+      console.error("Toggle Failed", e);
+      setGlobalAutoTrade(!globalAutoTrade); // Revert
+      toast.toast({ title: "Error", description: "Failed to toggle Auto-Bet", variant: "destructive" });
+    }
+  };
+
+  useEffect(() => {
+    fetchGlobalAutoTradeStatus();
+    const interval = setInterval(fetchGlobalAutoTradeStatus, 5000); // Poll status
+    return () => clearInterval(interval);
+  }, []);
 
   // --- LIVE MODE STATE ---
   const [isLive, setIsLive] = useState(() => {
@@ -638,7 +712,7 @@ function App() {
 
     // Ensure backend WS is running (idempotent call)
     const { primary } = getBackendUrl();
-    fetch(`${primary}/api/ws/start?is_live=${isLive}`).catch(e => console.error("WS Start ping failed", e));
+    fetch(`${primary}/api/ws/start?is_live=${isLive}`, { method: "POST" }).catch(e => console.error("WS Start ping failed", e));
 
     // Status Polling for UI Indicators
     const updateUiStatus = async () => {
@@ -1000,6 +1074,22 @@ function App() {
               {isLive ? "Mainnet" : "Testnet"}
             </div>
 
+            {/* Global Auto-Trade Toggle */}
+            <div className={cn(
+              "flex items-center gap-2 border px-3 py-1.5 rounded-lg shadow-sm transition-all duration-300",
+              globalAutoTrade ? "bg-purple-500/10 border-purple-500/30" : "bg-card"
+            )}>
+              <span className={cn("text-sm font-bold", globalAutoTrade ? "text-purple-500" : "text-muted-foreground")}>
+                Auto-Bet
+              </span>
+              <Switch
+                checked={globalAutoTrade}
+                onCheckedChange={toggleGlobalAutoTrade}
+                className="data-[state=checked]:bg-purple-600"
+              />
+              <span className={cn("inline-block w-2 h-2 rounded-full animate-pulse", globalAutoTrade ? "bg-purple-500" : "bg-gray-300")}></span>
+            </div>
+
             {/* Live Mode Toggle (moved here) */}
             <div className="flex items-center gap-2 bg-card border px-3 py-1.5 rounded-lg shadow-sm">
               <span className="text-sm font-medium">Live Toggle</span>
@@ -1041,21 +1131,19 @@ function App() {
               >
                 <Settings className="h-4 w-4" /> Settings
               </Button>
+              <Button
+                variant={currentTab === 'pnl' ? 'secondary' : 'ghost'}
+                size="sm"
+                onClick={() => setCurrentTab('pnl')}
+                className="gap-2"
+              >
+                <History className="h-4 w-4" /> History
+              </Button>
             </div>
           </div>
         </div>
 
-        {/* --- AUTO TRADE TAB --- */}
-        {currentTab === 'auto-trade' && (
-          <AutoTradePage
-            topOpportunities={[...data]
-              .filter(item => item.spread > 0 && item.binanceRate !== -999 && item.bybitRate !== -999)
-              .sort((a, b) => b.spread - a.spread)
-              .slice(0, 5)
-            }
-            isLive={isLive}
-          />
-        )}
+
 
         {/* --- SCANNER TAB --- */}
         {currentTab === 'scanner' && (
@@ -1447,7 +1535,8 @@ function App() {
             <TradeSidePanel
               isOpen={!!selectedOpportunity}
               onClose={() => setSelectedOpportunity(null)}
-              data={selectedOpportunity}
+              // LIVE UPDATE FIX: Look up the symbol in the live 'data' array
+              data={data.find(d => d.symbol === selectedOpportunity?.symbol) || selectedOpportunity}
             />
 
             {/* Temporarily commented out old modal for direct replacement as per request */}
@@ -1459,11 +1548,27 @@ function App() {
           </>
         )}
 
-        {/* --- DASHBOARD TAB --- */}
-        {currentTab === 'dashboard' && <DashboardPage />}
+        {/* --- AUTO TRADE TAB --- */}
+        {currentTab === 'auto-trade' && (
+          <AutoTradePage
+            topOpportunities={[...data]
+              .filter(item => item.spread > 0 && item.binanceRate !== -999 && item.bybitRate !== -999)
+              .sort((a, b) => b.spread - a.spread)
+              .slice(0, 5)
+            }
+            allMarketData={data} // Pass full live data for Radar updates
+            isLive={isLive}
+          />
+        )}
 
         {/* --- SETTINGS TAB --- */}
         {currentTab === 'settings' && <SettingsPage />}
+
+        {/* --- HISTORY / PNL TAB --- */}
+        {currentTab === 'pnl' && <PnLPage isLive={isLive} />}
+
+        {/* --- DASHBOARD TAB --- */}
+        {currentTab === 'dashboard' && <DashboardPage />}
 
       </div>
     </div >
