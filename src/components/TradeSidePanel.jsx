@@ -723,21 +723,21 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
                                 {/* 1. Primary Profit Metrics (Always Visible) */}
                                 <div className="grid grid-cols-2 gap-2 text-xs">
                                     <div className="bg-green-500/10 rounded p-1.5 border border-green-500/20 text-center">
-                                        <div className="text-gray-400 text-[9px] uppercase tracking-wide">Est. Daily Profit</div>
+                                        <div className="text-gray-400 text-[9px] uppercase tracking-wide">Next Funding Earning</div>
                                         <div className="text-green-400 font-bold text-sm">
-                                            +${((Number(amount) * leverage * 2 * recommendation.expectedProfit24h) / 100).toFixed(2)}
+                                            +${((Number(amount) * leverage * recommendation.expectedProfit) / 100).toFixed(2)}
                                         </div>
                                         <div className="text-[9px] text-green-500/80">
-                                            +{recommendation.expectedProfit24h.toFixed(2)}% / day
+                                            Yield: +{recommendation.expectedProfit.toFixed(4)}%
                                         </div>
                                     </div>
                                     <div className="bg-purple-500/10 rounded p-1.5 border border-purple-500/20 text-center">
-                                        <div className="text-gray-400 text-[9px] uppercase tracking-wide">ROI on Invest</div>
+                                        <div className="text-gray-400 text-[9px] uppercase tracking-wide">Est. Daily Profit</div>
                                         <div className="text-purple-400 font-bold text-sm">
-                                            +{(recommendation.expectedProfit24h * leverage * 2).toFixed(2)}%
+                                            +${((Number(amount) * leverage * recommendation.expectedProfit24h) / 100).toFixed(2)}
                                         </div>
                                         <div className="text-[9px] text-purple-500/80">
-                                            Daily Return
+                                            +{recommendation.expectedProfit24h.toFixed(2)}% / day
                                         </div>
                                     </div>
                                 </div>
@@ -1041,44 +1041,71 @@ export function TradeSidePanel({ isOpen, onClose, data, onExecute }) {
                                 Auto Trade (Next Minute)
                             </Button>
 
-                            {/* Individual Trades with Exchange Logos */}
-                            <div className="grid grid-cols-2 gap-2">
-                                <Button
-                                    className={cn(
-                                        "h-10 text-white font-bold text-sm rounded-md",
-                                        isTradeLocked ? "bg-gray-700 cursor-not-allowed opacity-50" : "bg-[#2ebd85] hover:bg-[#2ebd85]/90"
-                                    )}
-                                    onClick={() => handleExecuteClick("Long", recommendation.longPlatform)}
-                                    disabled={loading || isTradeLocked}
-                                >
-                                    <img
-                                        src={recommendation.longPlatform === "Binance" ? EXCHANGE_LOGOS.binance : EXCHANGE_LOGOS.bybit}
-                                        className="w-4 h-4 rounded-full mr-1"
-                                        alt={recommendation.longPlatform}
-                                    />
-                                    <TrendingUp className="w-4 h-4 mr-1" />
-                                    Long
-                                </Button>
-                                <Button
-                                    className={cn(
-                                        "h-10 text-white font-bold text-sm rounded-md",
-                                        isTradeLocked ? "bg-gray-700 cursor-not-allowed opacity-50" : "bg-[#f6465d] hover:bg-[#f6465d]/90"
-                                    )}
-                                    onClick={() => handleExecuteClick("Short", recommendation.shortPlatform)}
-                                    disabled={loading || isTradeLocked}
-                                >
-                                    <img
-                                        src={recommendation.shortPlatform === "Binance" ? EXCHANGE_LOGOS.binance : EXCHANGE_LOGOS.bybit}
-                                        className="w-4 h-4 rounded-full mr-1"
-                                        alt={recommendation.shortPlatform}
-                                    />
-                                    <TrendingDown className="w-4 h-4 mr-1" />
-                                    Short
-                                </Button>
+                            {/* Individual Trades with Exchange Logos - Manual Mode */}
+                            <div className="grid grid-cols-2 gap-2 pt-2 border-t border-white/10 mt-2">
+                                <div className="text-xs text-gray-500 col-span-2 text-center font-bold uppercase tracking-wider">Manual Trade</div>
+
+                                {/* Binance Manual Controls */}
+                                <div className="col-span-1 space-y-1">
+                                    <div className="text-[10px] text-gray-400 text-center flex items-center justify-center gap-1">
+                                        <img src={EXCHANGE_LOGOS.binance} className="w-3 h-3 rounded-full" alt="Binance" /> Binance
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-1">
+                                        <Button
+                                            className={cn(
+                                                "h-8 text-white font-bold text-xs rounded-md px-1",
+                                                isTradeLocked ? "bg-gray-700 cursor-not-allowed opacity-50" : "bg-[#2ebd85] hover:bg-[#2ebd85]/90"
+                                            )}
+                                            onClick={() => handleExecuteClick("Long", "Binance")}
+                                            disabled={loading || isTradeLocked}
+                                        >
+                                            Long
+                                        </Button>
+                                        <Button
+                                            className={cn(
+                                                "h-8 text-white font-bold text-xs rounded-md px-1",
+                                                isTradeLocked ? "bg-gray-700 cursor-not-allowed opacity-50" : "bg-[#f6465d] hover:bg-[#f6465d]/90"
+                                            )}
+                                            onClick={() => handleExecuteClick("Short", "Binance")}
+                                            disabled={loading || isTradeLocked}
+                                        >
+                                            Short
+                                        </Button>
+                                    </div>
+                                </div>
+
+                                {/* Bybit Manual Controls */}
+                                <div className="col-span-1 space-y-1">
+                                    <div className="text-[10px] text-gray-400 text-center flex items-center justify-center gap-1">
+                                        <img src={EXCHANGE_LOGOS.bybit} className="w-3 h-3 rounded-full" alt="Bybit" /> Bybit
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-1">
+                                        <Button
+                                            className={cn(
+                                                "h-8 text-white font-bold text-xs rounded-md px-1",
+                                                isTradeLocked ? "bg-gray-700 cursor-not-allowed opacity-50" : "bg-[#2ebd85] hover:bg-[#2ebd85]/90"
+                                            )}
+                                            onClick={() => handleExecuteClick("Long", "Bybit")}
+                                            disabled={loading || isTradeLocked}
+                                        >
+                                            Long
+                                        </Button>
+                                        <Button
+                                            className={cn(
+                                                "h-8 text-white font-bold text-xs rounded-md px-1",
+                                                isTradeLocked ? "bg-gray-700 cursor-not-allowed opacity-50" : "bg-[#f6465d] hover:bg-[#f6465d]/90"
+                                            )}
+                                            onClick={() => handleExecuteClick("Short", "Bybit")}
+                                            disabled={loading || isTradeLocked}
+                                        >
+                                            Short
+                                        </Button>
+                                    </div>
+                                </div>
                             </div>
                         </div>
 
-                        <div className="text-xs text-gray-500 flex items-center gap-1 cursor-pointer hover:text-white">
+                        <div className="text-xs text-gray-500 flex items-center gap-1 cursor-pointer hover:text-white mt-1">
                             <Calculator className="w-3 h-3" /> Calculator
                         </div>
                     </div>

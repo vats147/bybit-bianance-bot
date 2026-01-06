@@ -1,0 +1,32 @@
+[
+  {
+    "id": "dummy-trade-8472",
+    "symbol": "BTC",
+    "entry_time": 1736140000,
+    "exit_time": 1736143600,
+    "side_binance": "Sell",
+    "side_bybit": "Buy",
+    "amount": 100.0,
+    "qty_binance": 0.001,
+    "qty_bybit": 0.001,
+    "leverage": 10,
+    "est_profit": 0.05,
+    "realized_profit": 0.0,
+    "status": "CLOSED"
+  },
+  {
+    "id": "cc993200-eeab-4677-9cdb-f04273abe11a",
+    "symbol": "RIVER",
+    "entry_time": 1767682557.112997,
+    "exit_time": 1767682834.329377,
+    "side_binance": "Buy",
+    "side_bybit": "Sell",
+    "amount": 100.0,
+    "qty_binance": 60.011,
+    "qty_bybit": 59.478,
+    "leverage": 10,
+    "est_profit": 0.01,
+    "realized_profit": 0,
+    "status": "CLOSED"
+  }
+]
