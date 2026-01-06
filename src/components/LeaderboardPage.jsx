@@ -189,6 +189,11 @@ export function LeaderboardPage() {
                                                 <div className="flex flex-col">
                                                     <span className={`font-bold ${isMe ? "text-primary" : ""}`}>
                                                         {bot.name} {isMe && "(You)"}
+                                                        {bot.stats?.is_active && (
+                                                            <span className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-green-500/10 text-green-600 animate-pulse border border-green-500/20">
+                                                                LIVE
+                                                            </span>
+                                                        )}
                                                     </span>
                                                     <span className="text-[10px] text-muted-foreground font-mono">{bot.id.substr(0, 8)}...</span>
                                                 </div>

@@ -231,6 +231,9 @@ function App() {
           console.warn("Leaderboard: PnL fetch failed, sending default stats", err);
         }
 
+        // Add Active Status from current state
+        stats.is_active = globalAutoTrade;
+
         // Get ID and Name
         let id = localStorage.getItem("bot_unique_id");
         if (!id) {
@@ -265,7 +268,7 @@ function App() {
     pingLeaderboard();
     const interval = setInterval(pingLeaderboard, 60000);
     return () => clearInterval(interval);
-  }, []);
+  }, [globalAutoTrade]);
 
   const toggleGlobalAutoTrade = async () => {
     try {

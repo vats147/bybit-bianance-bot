@@ -2875,6 +2875,7 @@ async def auto_trade_service():
                     # Or we could track per-session profit. For now, just keep it alive.
                      try:
                         stats = trade_manager.get_summary() # Using global stats for now
+                        stats['is_active'] = True
                         leaderboard.update_bot(session.bot_id, getattr(session, 'bot_name', 'Auto-Bot'), stats)
                      except: pass
 
