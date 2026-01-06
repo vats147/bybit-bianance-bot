@@ -871,26 +871,51 @@ function App() {
       }
     }, 3000); // Poll every 3s if fallback active
 
-    // One-time fetch for funding intervals
+
+    // One-time fetch for funding intervals with fallback strategy
     const fetchIntervals = async () => {
       try {
         const { primary } = getBackendUrl();
-        const res = await fetch(`${primary}/api/binance/fapi/v1/exchangeInfo`);
-        const data = await res.json();
-        if (data.symbols) {
+        let data = null;
+
+        // Try backend proxy first (may be blocked on Render)
+        try {
+          const res = await fetch(`${primary}/api/binance/fapi/v1/exchangeInfo`, {
+            signal: AbortSignal.timeout(5000)
+          });
+          if (res.ok) data = await res.json();
+        } catch (e) {
+          console.warn("Backend proxy blocked, trying direct...");
+        }
+
+        // Fallback to direct Binance (may fail due to CORS)
+        if (!data) {
+          try {
+            const res = await fetch('https://fapi.binance.com/fapi/v1/exchangeInfo', {
+              signal: AbortSignal.timeout(5000)
+            });
+            if (res.ok) data = await res.json();
+          } catch (e) {
+            console.warn("Direct Binance failed (CORS expected)");
+          }
+        }
+
+        // Process if we got data
+        if (data?.symbols) {
           data.symbols.forEach(s => {
             if (s.pair) {
               let sym = s.pair.replace('USDT', '');
               if (!dataRef.current[sym]) dataRef.current[sym] = { symbol: sym };
-              if (s.fundingIntervalHours) {
-                dataRef.current[sym].fundingIntervalHours = s.fundingIntervalHours;
-              } else {
-                dataRef.current[sym].fundingIntervalHours = 8;
-              }
+              dataRef.current[sym].fundingIntervalHours = s.fundingIntervalHours || 8;
             }
           });
+          console.log("✅ Loaded intervals from exchangeInfo");
+        } else {
+          console.log("ℹ️ Using intervals from /api/rates (backend provides this)");
         }
-      } catch (e) { console.error("Interval fetch failed", e); }
+      } catch (e) {
+        console.error("Interval fetch error, using /api/rates data", e);
+      }
     };
     fetchIntervals();
 
