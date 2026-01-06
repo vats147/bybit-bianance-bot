@@ -53,16 +53,32 @@ class TradeScheduler:
                 tasks.append(self._internal_place_order(params['symbol'], params['bybit_side'], params['qty'], params['leverage'], "BYBIT", params))
             if params['platform'] in ["Binance", "Both"]:
                 tasks.append(self._internal_place_order(params['symbol'], params['binance_side'], params['qty'], params['leverage'], "BINANCE", params))
-            await asyncio.gather(*tasks)
             
-            await asyncio.sleep(params.get('duration', 30))
+            # FIX: Use return_exceptions=True to ensure partial failures don't abort the entire sequence
+            entry_results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Log any entry errors
+            for res in entry_results:
+                if isinstance(res, Exception):
+                    print(f"Entry Error during sequence: {res}")
+
+            # Safe sleep duration
+            try:
+                duration = float(params.get('duration', 30))
+            except:
+                duration = 30.0
+            
+            await asyncio.sleep(duration)
+
             self.tasks[task_id]['status'] = "EXECUTING_EXIT"
             exits = []
             if params['platform'] in ["Bybit", "Both"]:
                 exits.append(self._internal_place_order(params['symbol'], "Sell" if params['bybit_side']=="Buy" else "Buy", params['qty'], params['leverage'], "BYBIT", params))
             if params['platform'] in ["Binance", "Both"]:
                 exits.append(self._internal_place_order(params['symbol'], "Sell" if params['binance_side']=="Buy" else "Buy", params['qty'], params['leverage'], "BINANCE", params))
-            await asyncio.gather(*exits)
+            
+            # FIX: Use return_exceptions=True to ensure one exit failure doesn't stop others
+            await asyncio.gather(*exits, return_exceptions=True)
             
             self.tasks[task_id]['status'] = "COMPLETED"
         except Exception as e:
