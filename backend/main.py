@@ -2731,9 +2731,14 @@ async def execute_auto_trade_exit(symbol, side_binance, side_bybit, qty_binance,
         tasks.append(scheduler._internal_place_order(symbol, close_side_binance, qty_binance, leverage, "BINANCE", params))
         
         t_api_start = time.time()
-        await asyncio.gather(*tasks)
+        # FIX: Use return_exceptions=True to ensure partial failures don't stop the other leg from closing
+        results = await asyncio.gather(*tasks, return_exceptions=True)
         t_api_end = time.time()
         print(f"⚡ API Response Time (Exit): {int((t_api_end - t_api_start) * 1000)}ms")
+        
+        for res in results:
+            if isinstance(res, Exception):
+                print(f"Auto-Exit Partial Error: {res}")
         
     except Exception as e:
         print(f"Auto-Exit Error: {e}")
@@ -3154,34 +3159,37 @@ async def auto_trade_service():
                                 print(f"{user_prefix}🕒 Scheduled Auto-Exit in {wait_seconds:.1f}s | Reason: {schedule_reason}")
                                 
                                 async def scheduled_exit_task(s_symbol, s_wait, s_session): # Closure capture
-                                    await asyncio.sleep(s_wait)
-                                    # Check if still active
-                                    if s_symbol in s_session.active_trades:
-                                        trade = s_session.active_trades[s_symbol]
-                                        e_bin = "BUY" if trade['sides']['binance'] == "Sell" else "SELL"
-                                        e_byb = "Sell" if trade['sides']['bybit'] == "Buy" else "Buy"
-                                        
-                                        t_exit_start = time.time()
-                                        await execute_auto_trade_exit(s_symbol, e_bin, e_byb, trade['qty_binance'], trade['qty_bybit'], effective_leverage, s_session.config["is_live"], s_session)
-                                        t_exit_end = time.time()
-                                        dur_exit = int((t_exit_end - t_exit_start) * 1000)
-                                        
-                                        # Calculate Total Lifecycle Duration (Entry to Exit)
-                                        entry_time = trade.get('entry_time', t_exit_end)
-                                        total_duration = t_exit_end - entry_time
-                                        total_dur_str = f"{total_duration:.2f}s"
-
-                                        log_msg = f"Auto Exit after Funding ({dur_exit}ms API) | Total Held: {total_dur_str}"
-                                        print(f"{user_prefix}✅ {log_msg}")
-
-                                        s_session.logs.append({
-                                            "time": time.time(),
-                                            "type": "EXIT (AUTO)",
-                                            "symbol": s_symbol,
-                                            "msg": log_msg
-                                        })
+                                    try:
+                                        await asyncio.sleep(s_wait)
+                                        # Check if still active
                                         if s_symbol in s_session.active_trades:
-                                            del s_session.active_trades[s_symbol]
+                                            trade = s_session.active_trades[s_symbol]
+                                            e_bin = "BUY" if trade['sides']['binance'] == "Sell" else "SELL"
+                                            e_byb = "Sell" if trade['sides']['bybit'] == "Buy" else "Buy"
+                                            
+                                            t_exit_start = time.time()
+                                            await execute_auto_trade_exit(s_symbol, e_bin, e_byb, trade['qty_binance'], trade['qty_bybit'], effective_leverage, s_session.config["is_live"], s_session)
+                                            t_exit_end = time.time()
+                                            dur_exit = int((t_exit_end - t_exit_start) * 1000)
+                                            
+                                            # Calculate Total Lifecycle Duration (Entry to Exit)
+                                            entry_time = trade.get('entry_time', t_exit_end)
+                                            total_duration = t_exit_end - entry_time
+                                            total_dur_str = f"{total_duration:.2f}s"
+
+                                            log_msg = f"Auto Exit after Funding ({dur_exit}ms API) | Total Held: {total_dur_str}"
+                                            print(f"{user_prefix}✅ {log_msg}")
+
+                                            s_session.logs.append({
+                                                "time": time.time(),
+                                                "type": "EXIT (AUTO)",
+                                                "symbol": s_symbol,
+                                                "msg": log_msg
+                                            })
+                                            if s_symbol in s_session.active_trades:
+                                                del s_session.active_trades[s_symbol]
+                                    except Exception as e:
+                                        print(f"{user_prefix}❌ Scheduled Exit Task Failed: {e}")
 
                                 asyncio.create_task(scheduled_exit_task(symbol, wait_seconds, session))
                         
