@@ -164,7 +164,7 @@ BYBIT_WS_TESTNET = "wss://stream-testnet.bybit.com/v5/public/linear"
 # Default Keys from Env or Hardcoded (Fallback)
 DEFAULT_BYBIT_API_KEY = os.getenv("BYBIT_API_KEY", "GS68TldhIYqdRUOz4V")
 DEFAULT_BYBIT_SECRET = os.getenv("BYBIT_SECRET", "b5suxCOFWQsV2IoGDZ2HnNyhxDvt4NQNAReK")
-BYBIT_DEMO_URL = os.getenv("BYBIT_DEMO_URL", "https://api-demo.bybit.com")
+BYBIT_DEMO_URL = os.getenv("BYBIT_DEMO_URL", "https://api-testnet.bybit.com")
 
 # Cache for Instrument Info (qtyStep, minOrderQty)
 INSTRUMENT_CACHE = {}
