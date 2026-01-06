@@ -3007,7 +3007,7 @@ async def auto_trade_service():
                         # Default max price diff to 2% if not set
                         max_price_diff_cfg = session.config.get("max_price_diff", 2.0) 
                         
-                        if (rate_diff * 100) > min_diff_cfg:
+                        if (rate_diff * 100) > min_diff_cfg and price_diff_pct <= max_price_diff_cfg:
                             candidates.append({
                                 "symbol": symbol,
                                 "binance_rate": binance_rate,
