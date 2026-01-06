@@ -878,39 +878,57 @@ function App() {
         const { primary } = getBackendUrl();
         let data = null;
 
-        // Try backend proxy first (may be blocked on Render - 451 expected)
+        // Strategy 1: Try backend proxy first
+        console.log("📡 Attempting to fetch exchangeInfo via backend proxy...");
         try {
           const res = await fetch(`${primary}/api/binance/fapi/v1/exchangeInfo`, {
             signal: AbortSignal.timeout(5000)
           });
-          if (res.ok) data = await res.json();
+
+          if (res.ok) {
+            data = await res.json();
+            console.log("✅ Backend proxy successful");
+          } else {
+            console.warn(`⚠️ Backend proxy failed: ${res.status} ${res.statusText}`);
+          }
         } catch (e) {
-          // Silent catch - 451 errors are expected and handled by fallback
+          console.warn("⚠️ Backend proxy error:", e.message);
         }
 
-        // Fallback to direct Binance (may fail due to CORS)
+        // Strategy 2: Fallback to direct Binance API (client-side)
         if (!data) {
+          console.log("📡 Attempting direct Binance API call...");
           try {
             const res = await fetch('https://fapi.binance.com/fapi/v1/exchangeInfo', {
-              signal: AbortSignal.timeout(5000)
+              signal: AbortSignal.timeout(5000),
+              mode: 'cors'
             });
-            if (res.ok) data = await res.json();
+
+            if (res.ok) {
+              data = await res.json();
+              console.log("✅ Direct Binance API successful");
+            } else {
+              console.warn(`⚠️ Direct Binance failed: ${res.status}`);
+            }
           } catch (e) {
-            // Silent catch - CORS errors are expected if direct API blocked
+            console.warn("⚠️ Direct Binance error (likely CORS):", e.message);
           }
         }
 
         // Process if we got data
         if (data?.symbols) {
+          let processedCount = 0;
           data.symbols.forEach(s => {
             if (s.pair) {
               let sym = s.pair.replace('USDT', '');
               if (!dataRef.current[sym]) dataRef.current[sym] = { symbol: sym };
               dataRef.current[sym].fundingIntervalHours = s.fundingIntervalHours || 8;
+              processedCount++;
             }
           });
-          console.log("✅ Loaded intervals from exchangeInfo");
+          console.log(`✅ Loaded intervals for ${processedCount} symbols from exchangeInfo`);
         } else {
+          console.warn("⚠️ All interval fetch strategies failed.");
           console.log("ℹ️ Using intervals from /api/rates (backend provides this)");
         }
       } catch (e) {
