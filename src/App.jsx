@@ -78,7 +78,8 @@ const COINSWITCH_API_URL = "https://coinswitch.co/trade/api/v2/24hr/all-pairs/ti
 
 const fetchBinanceRates = async () => {
   try {
-    const res = await fetch(BINANCE_API);
+    const { primary } = getBackendUrl();
+    const res = await fetch(`${primary}/api/binance/fapi/v1/premiumIndex`);
     const data = await res.json();
     const rates = {};
     data.forEach(item => {
@@ -873,7 +874,8 @@ function App() {
     // One-time fetch for funding intervals
     const fetchIntervals = async () => {
       try {
-        const res = await fetch('/api/binance/fapi/v1/exchangeInfo');
+        const { primary } = getBackendUrl();
+        const res = await fetch(`${primary}/api/binance/fapi/v1/exchangeInfo`);
         const data = await res.json();
         if (data.symbols) {
           data.symbols.forEach(s => {
