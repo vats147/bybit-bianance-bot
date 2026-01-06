@@ -2726,16 +2726,34 @@ async def execute_auto_trade_exit(symbol, side_binance, side_bybit, qty_binance,
             "reduce_only": True
         }
         
-        # Execute concurrently
         tasks = []
         # Bybit Close
         tasks.append(scheduler._internal_place_order(symbol, close_side_bybit, qty_bybit, leverage, "BYBIT", params))
         # Binance Close
         tasks.append(scheduler._internal_place_order(symbol, close_side_binance, qty_binance, leverage, "BINANCE", params))
+
+        # Execute concurrently or sequentially
+        delay_ms = session.config.get("exit_order_delay", 0) if session else 0
         
         t_api_start = time.time()
-        # FIX: Use return_exceptions=True to ensure partial failures don't stop the other leg from closing
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        results = []
+        
+        if delay_ms > 0:
+            print(f"⚡ Sequential Exit (Delay: {delay_ms}ms)")
+            for i, task in enumerate(tasks):
+                try:
+                    res = await task
+                    results.append(res)
+                except Exception as e:
+                    results.append(e)
+                
+                # Wait if not last
+                if i < len(tasks) - 1:
+                    await asyncio.sleep(delay_ms / 1000.0)
+        else:
+            # FIX: Use return_exceptions=True to ensure partial failures don't stop the other leg from closing
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
         t_api_end = time.time()
         print(f"⚡ API Response Time (Exit): {int((t_api_end - t_api_start) * 1000)}ms")
         

@@ -40,6 +40,7 @@ export function AutoTradePage({ topOpportunities = [], allMarketData = [], isLiv
         auto_exit: true,
         entry_before_seconds: 300,
         exit_after_seconds: 10,
+        exit_order_delay: 0,
         ignore_timing: false
     });
 
@@ -396,6 +397,12 @@ export function AutoTradePage({ topOpportunities = [], allMarketData = [], isLiv
                                     value={config?.exit_after_seconds ?? 30}
                                     suffix="sec"
                                     onChange={(e) => setConfig({ ...config, exit_after_seconds: parseInt(e.target.value) || 30 })}
+                                />
+                                <SettingInput
+                                    label="Exit Order Delay"
+                                    value={config?.exit_order_delay ?? 0}
+                                    suffix="ms"
+                                    onChange={(e) => setConfig({ ...config, exit_order_delay: parseInt(e.target.value) || 0 })}
                                 />
                                 <div className="flex items-center justify-between">
                                     <label className="text-[10px] font-bold text-muted-foreground">Auto-Exit</label>
