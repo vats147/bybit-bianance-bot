@@ -1226,11 +1226,17 @@ function App() {
         <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
           <div>
             <h1 className="text-3xl font-bold tracking-tight bg-gradient-to-r from-blue-600 to-cyan-500 bg-clip-text text-transparent">
-              Funding Arb Bot
+              {
+                {
+                  'scanner': 'Scanner',
+                  'dashboard': 'Dashboard',
+                  'auto-trade': 'Auto-Bot',
+                  'settings': 'Settings',
+                  'pnl': 'History',
+                  'leaderboard': 'Rankings'
+                }[currentTab] || 'Funding Arb Bot'
+              }
             </h1>
-            <p className="text-muted-foreground mt-1">
-              Real-time funding rate arbitrage monitor
-            </p>
           </div>
 
           <div className="flex items-center gap-4">
