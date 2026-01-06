@@ -878,14 +878,14 @@ function App() {
         const { primary } = getBackendUrl();
         let data = null;
 
-        // Try backend proxy first (may be blocked on Render)
+        // Try backend proxy first (may be blocked on Render - 451 expected)
         try {
           const res = await fetch(`${primary}/api/binance/fapi/v1/exchangeInfo`, {
             signal: AbortSignal.timeout(5000)
           });
           if (res.ok) data = await res.json();
         } catch (e) {
-          console.warn("Backend proxy blocked, trying direct...");
+          // Silent catch - 451 errors are expected and handled by fallback
         }
 
         // Fallback to direct Binance (may fail due to CORS)
@@ -896,7 +896,7 @@ function App() {
             });
             if (res.ok) data = await res.json();
           } catch (e) {
-            console.warn("Direct Binance failed (CORS expected)");
+            // Silent catch - CORS errors are expected if direct API blocked
           }
         }
 
