@@ -215,11 +215,21 @@ function App() {
     const pingLeaderboard = async () => {
       try {
         const { primary } = getBackendUrl();
-        // Fetch PnL Summary first
-        const pnlRes = await fetch(`${primary}/api/pnl/overview`);
-        if (!pnlRes.ok) return;
-        const pnlData = await pnlRes.json();
-        const stats = pnlData.summary;
+        // Initialize default stats
+        let stats = { total_profit: 0, win_rate: 0, trades: 0 };
+
+        try {
+          // Fetch PnL Summary first - fail safely if this endpoint is down
+          const pnlRes = await fetch(`${primary}/api/pnl/overview`);
+          if (pnlRes.ok) {
+            const pnlData = await pnlRes.json();
+            if (pnlData.summary) {
+              stats = pnlData.summary;
+            }
+          }
+        } catch (err) {
+          console.warn("Leaderboard: PnL fetch failed, sending default stats", err);
+        }
 
         // Get ID and Name
         let id = localStorage.getItem("bot_unique_id");
@@ -230,7 +240,8 @@ function App() {
         const name = localStorage.getItem("bot_name") || `Bot-${id.substr(0, 4)}`;
 
         // Send Ping
-        await fetch(`${primary}/api/leaderboard/ping`, {
+        console.log("Leaderboard: Sending Ping...", { id, name, stats });
+        const pingRes = await fetch(`${primary}/api/leaderboard/ping`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -239,8 +250,14 @@ function App() {
             stats: stats
           })
         });
+
+        if (pingRes.ok) {
+          console.log("Leaderboard: Ping Success");
+        } else {
+          console.error("Leaderboard: Ping Failed", pingRes.status);
+        }
       } catch (e) {
-        // Silent fail
+        console.error("Leaderboard: Ping Error", e);
       }
     };
 
