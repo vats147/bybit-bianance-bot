@@ -113,12 +113,12 @@ class TradeScheduler:
                   api_key = bybit_key or DEFAULT_BYBIT_API_KEY
                   api_secret = bybit_secret or DEFAULT_BYBIT_SECRET
                   if api_key and "YOUR_" not in api_key:
-                      res = await execute_bybit_logic(api_key, api_secret, symbol, side, qty, leverage, is_live=is_live)
+                      res = await execute_bybit_logic(api_key, api_secret, symbol, side, qty, leverage, is_live=is_live, reduce_only=params.get('reduce_only', False))
              elif platform == "BINANCE":
                   api_key = binance_key or os.getenv("USER_BINANCE_KEY")
                   api_secret = binance_secret or os.getenv("USER_BINANCE_SECRET")
                   if api_key and "YOUR_" not in api_key:
-                      res = await execute_binance_logic(api_key, api_secret, symbol, side, qty, leverage, is_testnet=not is_live)
+                      res = await execute_binance_logic(api_key, api_secret, symbol, side, qty, leverage, is_testnet=not is_live, reduce_only=params.get('reduce_only', False))
 
              return res if res else {"status": "error", "message": "No response"}
         except Exception as e:
@@ -1056,7 +1056,7 @@ def adjust_qty_to_step(qty, step_size, min_qty):
     # Fix floating point precision
     return round(adjusted, 10)
 
-async def execute_bybit_logic(api_key, api_secret, symbol, side, qty, leverage, category="linear", is_live=False):
+async def execute_bybit_logic(api_key, api_secret, symbol, side, qty, leverage, category="linear", is_live=False, reduce_only=False):
     """Execute Bybit order. is_live=True uses real API, False uses demo API."""
     base_url = "https://api.bybit.com" if is_live else BYBIT_DEMO_URL
     try:
@@ -1098,6 +1098,7 @@ async def execute_bybit_logic(api_key, api_secret, symbol, side, qty, leverage, 
             "side": side,
             "orderType": "Market",
             "qty": str(adjusted_qty),
+            "reduceOnly": reduce_only
         }
         
         payload_json = json.dumps(order_payload)
@@ -1135,7 +1136,7 @@ async def execute_bybit_logic(api_key, api_secret, symbol, side, qty, leverage, 
         raise HTTPException(status_code=500, detail=str(e))
 
 
-async def execute_binance_logic(api_key, api_secret, symbol, side, qty, leverage, is_testnet=True):
+async def execute_binance_logic(api_key, api_secret, symbol, side, qty, leverage, is_testnet=True, reduce_only=False):
     base_url = "https://testnet.binancefuture.com" if is_testnet else "https://fapi.binance.com"
     # Ensure symbol is uppercase for Binance
     usdt_symbol = (symbol.upper() + "USDT") if not symbol.upper().endswith("USDT") else symbol.upper()
@@ -1184,7 +1185,8 @@ async def execute_binance_logic(api_key, api_secret, symbol, side, qty, leverage
             "side": side.upper(),
             "type": "MARKET",
             "quantity": qty,
-            "timestamp": int(time.time() * 1000)
+            "timestamp": int(time.time() * 1000),
+            "reduceOnly": "true" if reduce_only else "false"
         }
         
         query_string = urlencode(params)
@@ -2720,7 +2722,8 @@ async def execute_auto_trade_exit(symbol, side_binance, side_bybit, qty_binance,
             "bybit_key": keys.get("bybit_key"),
             "bybit_secret": keys.get("bybit_secret"),
             "binance_key": keys.get("binance_key"),
-            "binance_secret": keys.get("binance_secret")
+            "binance_secret": keys.get("binance_secret"),
+            "reduce_only": True
         }
         
         # Execute concurrently
