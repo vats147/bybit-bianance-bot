@@ -49,18 +49,30 @@ class TradeScheduler:
             
             self.tasks[task_id]['status'] = "EXECUTING_ENTRY"
             tasks = []
+            platform_map = [] # Track which index corresponds to which platform
+
             if params['platform'] in ["Bybit", "Both"]:
                 tasks.append(self._internal_place_order(params['symbol'], params['bybit_side'], params['qty'], params['leverage'], "BYBIT", params))
+                platform_map.append("BYBIT")
             if params['platform'] in ["Binance", "Both"]:
                 tasks.append(self._internal_place_order(params['symbol'], params['binance_side'], params['qty'], params['leverage'], "BINANCE", params))
+                platform_map.append("BINANCE")
             
-            # FIX: Use return_exceptions=True to ensure partial failures don't abort the entire sequence
+            # Use return_exceptions=True to handle partial failures
             entry_results = await asyncio.gather(*tasks, return_exceptions=True)
             
-            # Log any entry errors
-            for res in entry_results:
-                if isinstance(res, Exception):
-                    print(f"Entry Error during sequence: {res}")
+            successful_platforms = set()
+            for i, res in enumerate(entry_results):
+                platform = platform_map[i]
+                is_success = False
+                # Check for Dictionary success response
+                if isinstance(res, dict) and res.get('status') == 'success':
+                    is_success = True
+                
+                if is_success:
+                    successful_platforms.add(platform)
+                else:
+                    print(f"Entry Failed for {platform}: {res}")
 
             # Safe sleep duration
             try:
@@ -72,13 +84,16 @@ class TradeScheduler:
 
             self.tasks[task_id]['status'] = "EXECUTING_EXIT"
             exits = []
-            if params['platform'] in ["Bybit", "Both"]:
+            
+            # Only exit if we successfully entered!
+            if "BYBIT" in successful_platforms:
                 exits.append(self._internal_place_order(params['symbol'], "Sell" if params['bybit_side']=="Buy" else "Buy", params['qty'], params['leverage'], "BYBIT", params))
-            if params['platform'] in ["Binance", "Both"]:
+            
+            if "BINANCE" in successful_platforms:
                 exits.append(self._internal_place_order(params['symbol'], "Sell" if params['binance_side']=="Buy" else "Buy", params['qty'], params['leverage'], "BINANCE", params))
             
-            # FIX: Use return_exceptions=True to ensure one exit failure doesn't stop others
-            await asyncio.gather(*exits, return_exceptions=True)
+            if exits:
+                await asyncio.gather(*exits, return_exceptions=True)
             
             self.tasks[task_id]['status'] = "COMPLETED"
         except Exception as e:
