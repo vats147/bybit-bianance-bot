@@ -6,6 +6,7 @@ import { DashboardPage } from "./components/DashboardPage";
 import { AutoTradePage } from "./components/AutoTradePage";
 import { SettingsPage } from "./components/SettingsPage";
 import { PnLPage } from "./components/PnLPage";
+import { LeaderboardPage } from "./components/LeaderboardPage";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -208,6 +209,46 @@ function App() {
       return false;
     }
   };
+
+  // --- LEADERBOARD PING ---
+  useEffect(() => {
+    const pingLeaderboard = async () => {
+      try {
+        const { primary } = getBackendUrl();
+        // Fetch PnL Summary first
+        const pnlRes = await fetch(`${primary}/api/pnl/overview`);
+        if (!pnlRes.ok) return;
+        const pnlData = await pnlRes.json();
+        const stats = pnlData.summary;
+
+        // Get ID and Name
+        let id = localStorage.getItem("bot_unique_id");
+        if (!id) {
+          id = "bot_" + Math.random().toString(36).substr(2, 9);
+          localStorage.setItem("bot_unique_id", id);
+        }
+        const name = localStorage.getItem("bot_name") || `Bot-${id.substr(0, 4)}`;
+
+        // Send Ping
+        await fetch(`${primary}/api/leaderboard/ping`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            id: id,
+            name: name,
+            stats: stats
+          })
+        });
+      } catch (e) {
+        // Silent fail
+      }
+    };
+
+    // Ping every minute
+    pingLeaderboard();
+    const interval = setInterval(pingLeaderboard, 60000);
+    return () => clearInterval(interval);
+  }, []);
 
   const toggleGlobalAutoTrade = async () => {
     try {
@@ -1238,6 +1279,14 @@ function App() {
               >
                 <History className="h-4 w-4" /> History
               </Button>
+              <Button
+                variant={currentTab === 'leaderboard' ? 'secondary' : 'ghost'}
+                size="sm"
+                onClick={() => setCurrentTab('leaderboard')}
+                className="gap-2"
+              >
+                <Trophy className="h-4 w-4" /> Rankings
+              </Button>
             </div>
           </div>
         </div>
@@ -1677,6 +1726,9 @@ function App() {
 
         {/* --- DASHBOARD TAB --- */}
         {currentTab === 'dashboard' && <DashboardPage />}
+
+        {/* --- LEADERBOARD TAB --- */}
+        {currentTab === 'leaderboard' && <LeaderboardPage />}
 
       </div>
     </div >

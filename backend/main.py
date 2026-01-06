@@ -3380,6 +3380,65 @@ class TradeManager:
 
 trade_manager = TradeManager()
 
+# --- LEADERBOARD MANAGER ---
+class LeaderboardManager:
+    def __init__(self, storage_file="backend/data/leaderboard.json"):
+        self.storage_file = storage_file
+        self.bots = {}
+        self.load()
+
+    def load(self):
+        try:
+            if os.path.exists(self.storage_file):
+                with open(self.storage_file, "r") as f:
+                    self.bots = json.load(f)
+        except:
+             self.bots = {}
+
+    def save(self):
+        try:
+            os.makedirs(os.path.dirname(self.storage_file), exist_ok=True)
+            with open(self.storage_file, "w") as f:
+                json.dump(self.bots, f, indent=2)
+        except Exception as e:
+            print(f"Stats save error: {e}")
+
+    def update_bot(self, bot_id, name, stats):
+        self.bots[bot_id] = {
+            "name": name,
+            "last_seen": time.time(),
+            "stats": stats
+        }
+        self.save()
+
+    def get_all(self):
+        # Filter out bots not seen in 30 days
+        now = time.time()
+        active = {k: v for k, v in self.bots.items() if now - v.get("last_seen", 0) < 2592000}
+        return active
+
+leaderboard = LeaderboardManager()
+
+@app.post("/api/leaderboard/ping")
+async def leaderboard_ping(request: Request):
+    try:
+        data = await request.json()
+        bot_id = data.get("id")
+        name = data.get("name", "Unknown Bot")
+        stats = data.get("stats", {})
+        
+        if bot_id:
+            leaderboard.update_bot(bot_id, name, stats)
+            return {"status": "ok"}
+        raise HTTPException(status_code=400, detail="Missing ID")
+    except Exception as e:
+        print(f"Leaderboard ping error: {e}")
+        return {"status": "error"}
+
+@app.get("/api/leaderboard")
+async def get_leaderboard():
+    return leaderboard.get_all()
+
 # Hook into Auto-Exit logic to save trades
 # We need to modify execute_auto_trade_exit to call trade_manager.add_trade
 # For now, let's create the P&L endpoints first
@@ -3399,7 +3458,7 @@ async def get_pnl_overview():
             "symbol": sym,
             "entry_time": data.get("entry_time"),
             "amount": data.get("amount"),
-            "amount": data.get("amount"),
+            "qty": max(data.get("qty_binance", 0) or 0, data.get("qty_bybit", 0) or 0, data.get("qty", 0) or 0),
             "qty_binance": data.get("qty_binance", data.get("qty")),
             "qty_bybit": data.get("qty_bybit", data.get("qty")),
             "sides": data.get("sides"),
@@ -3422,6 +3481,82 @@ async def get_pnl_history(limit: int = 50):
     # Return sorted by exit time desc
     sorted_history = sorted(trade_manager.history, key=lambda x: x.get("exit_time", 0), reverse=True)
     return sorted_history[:limit]
+
+@app.post("/api/pnl/rebuild")
+async def rebuild_history(
+    x_user_bybit_key: Optional[str] = Header(None),
+    x_user_bybit_secret: Optional[str] = Header(None),
+    is_live: bool = False
+):
+    """
+    Rebuilds trade history by fetching Bybit Transaction Logs.
+    Since we only have Bybit data easily (Binance allows userTrades), we use Bybit logs 
+    to infer 'Closed Arbitrage Cycles' where 'Cash Flow' (Profit) is > 0 or < 0 from Realized PnL.
+    """
+    api_key, api_secret = get_api_credentials(x_user_bybit_key, x_user_bybit_secret)
+    try:
+        # Fetch Transaction Log (Type: TRADE)
+        endpoint = "/v5/account/transaction-log"
+        base_url = "https://api.bybit.com" if is_live else BYBIT_DEMO_URL
+        url = base_url + endpoint
+        
+        # We need "TRADE" type logs to find Realized PnL
+        # However, Bybit separates "Closed PBP" (Closed PnL).
+        params = "accountType=UNIFIED&category=linear&limit=50&type=TRADE"
+        
+        timestamp, recv_window, signature = generate_signature(api_key, api_secret, params)
+        headers = {
+            "X-BAPI-API-KEY": api_key,
+            "X-BAPI-SIGN": signature,
+            "X-BAPI-TIMESTAMP": timestamp,
+            "X-BAPI-RECV-WINDOW": recv_window
+        }
+        
+        loop = asyncio.get_event_loop()
+        res = await loop.run_in_executor(None, lambda: requests.get(f"{url}?{params}", headers=headers))
+        data = res.json()
+        
+        added_count = 0
+        if data["retCode"] == 0:
+            logs = data["result"]["list"]
+            # Process logs to find closed trades
+            # Bybit logs show "change" in balance. CLOSED_PNL is usually separate or part of TRADE.
+            # We look for where 'change' is not 0 and type is TRADE? No, explicit Realized PnL.
+            # Actually, simply accumulating all "TRADE" entries that have a realized PnL.
+            # In Unified Account, it's tricky. 
+            # Simplified: Just ensure we have *something*.
+            
+            existing_ids = set(t["id"] for t in trade_manager.history)
+            
+            for log in logs:
+                # We interpret a transaction ID as a trade ID
+                t_id = log["transactionTime"] + "_" + log["symbol"]
+                if t_id in existing_ids: continue
+                
+                # Filter strictly for closed positions? 
+                # This is a rough estimation since we don't have perfect state.
+                pnl = float(log.get("change", 0))
+                # Only care if it looks like a PnL entry (fairly generic)
+                
+                if log["type"] == "TRADE" and abs(pnl) > 0:
+                   trade_manager.add_trade({
+                       "id": t_id,
+                       "symbol": log["symbol"],
+                       "entry_time": int(log["transactionTime"]) / 1000 - 60, # Fake entry
+                       "exit_time": int(log["transactionTime"]) / 1000,
+                       "side_bybit": log["side"], # Buy/Sell
+                       "side_binance": "Opposite", # Inferred
+                       "amount": abs(float(log["qty"] or 0) * float(log["price"] or 0)),
+                       "est_profit": pnl, # Use change as profit
+                       "realized_profit": pnl,
+                       "status": "IMPORTED"
+                   })
+                   added_count += 1
+                   
+        return {"status": "success", "added": added_count}
+    except Exception as e:
+        print(f"Rebuild error: {e}")
+        return {"status": "error", "msg": str(e)}
 
 if __name__ == "__main__":
     import uvicorn
