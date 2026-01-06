@@ -1552,6 +1552,64 @@ async def get_binance_orders(
         print(f"Binance Orders Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+# --- BINANCE API PROXY ENDPOINTS ---
+# These endpoints proxy requests to Binance API to avoid CORS issues in production
+# The frontend calls /api/binance/* and the backend forwards to fapi.binance.com
+
+@app.get("/api/binance/fapi/v1/exchangeInfo")
+async def proxy_binance_exchange_info():
+    """Proxy Binance exchangeInfo endpoint for production deployment."""
+    try:
+        url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(None, requests.get, url)
+        
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise HTTPException(status_code=response.status_code, detail="Binance API error")
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Binance Exchange Info Proxy Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/binance/fapi/v1/premiumIndex")
+async def proxy_binance_premium_index():
+    """Proxy Binance premiumIndex endpoint for production deployment."""
+    try:
+        url = "https://fapi.binance.com/fapi/v1/premiumIndex"
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(None, requests.get, url)
+        
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise HTTPException(status_code=response.status_code, detail="Binance API error")
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Binance Premium Index Proxy Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/binance/fapi/v1/fundingInfo")
+async def proxy_binance_funding_info():
+    """Proxy Binance fundingInfo endpoint for production deployment."""
+    try:
+        url = "https://fapi.binance.com/fapi/v1/fundingInfo"
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(None, requests.get, url)
+        
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise HTTPException(status_code=response.status_code, detail="Binance API error")
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Binance Funding Info Proxy Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 # --- LEVERAGE HELPERS ---
 
 async def get_bybit_max_leverage(symbol: str):

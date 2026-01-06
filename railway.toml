@@ -1,0 +1,17 @@
+services:
+  backend:
+    type: web
+    root: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - PORT
+      - BYBIT_API_KEY
+      - BYBIT_SECRET
+      - USER_BYBIT_KEY
+      - USER_BYBIT_SECRET
+      - USER_BINANCE_KEY
+      - USER_BINANCE_SECRET
+      - BYBIT_DEMO_URL
+      - BINANCE_WS_LIVE
+      - BINANCE_WS_TESTNET
