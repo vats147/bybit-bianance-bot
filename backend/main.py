@@ -3167,8 +3167,8 @@ async def auto_trade_service():
                                         # Check if still active
                                         if s_symbol in s_session.active_trades:
                                             trade = s_session.active_trades[s_symbol]
-                                            e_bin = "BUY" if trade['sides']['binance'] == "Sell" else "SELL"
-                                            e_byb = "Sell" if trade['sides']['bybit'] == "Buy" else "Buy"
+                                            e_bin = trade['sides']['binance']
+                                            e_byb = trade['sides']['bybit']
                                             
                                             t_exit_start = time.time()
                                             await execute_auto_trade_exit(s_symbol, e_bin, e_byb, trade['qty_binance'], trade['qty_bybit'], effective_leverage, s_session.config["is_live"], s_session)
