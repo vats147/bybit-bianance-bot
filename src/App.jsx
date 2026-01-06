@@ -44,7 +44,7 @@ const getBackendUrl = () => {
   }
 
   // Production/external - use saved or default cloud backend
-  const primary = savedPrimary || "https://newbot-apj2.onrender.com";
+  const primary = savedPrimary || "https://bybit-bianance-bot.onrender.com";
   return { primary, backup: savedBackup };
 };
 
@@ -317,7 +317,7 @@ function App() {
     // Enforcement: 
     // 1. Production -> Render
     // 2. Local -> localhost:8000 or network IP
-    const targetProdUrl = "https://newbot-apj2.onrender.com";
+    const targetProdUrl = "https://bybit-bianance-bot.onrender.com";
     const currentPrimary = localStorage.getItem("primary_backend_url");
 
     if (!isLocal && currentPrimary !== targetProdUrl) {

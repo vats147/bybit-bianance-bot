@@ -40,7 +40,7 @@ export function DashboardPage() {
             return { primary, backup: savedBackup };
         }
 
-        const primary = savedPrimary || "https://newbot-apj2.onrender.com";
+        const primary = savedPrimary || "https://bybit-bianance-bot.onrender.com";
         return { primary, backup: savedBackup };
     };
 

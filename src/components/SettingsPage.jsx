@@ -10,7 +10,7 @@ export function SettingsPage() {
     const DEFAULT_TG_CHAT_ID = "@arbitagebianance";
 
     const [config, setConfig] = useState({
-        primaryBackendUrl: "https://newbot-apj2.onrender.com",
+        primaryBackendUrl: "https://bybit-bianance-bot.onrender.com",
         backupBackendUrl: "",
         // Bybit - Separate Demo and Live keys
         bybitDemoKey: "",
@@ -85,7 +85,7 @@ export function SettingsPage() {
         const savedAlertLeadTime = localStorage.getItem("alert_lead_time");
 
         setConfig({
-            primaryBackendUrl: savedPrimary || "https://newbot-apj2.onrender.com",
+            primaryBackendUrl: savedPrimary || "https://bybit-bianance-bot.onrender.com",
             backupBackendUrl: savedBackup || "",
             // Bybit
             bybitDemoKey: savedBybitDemoKey || legacyBybitKey || "",

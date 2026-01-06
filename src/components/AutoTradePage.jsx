@@ -79,7 +79,7 @@ export function AutoTradePage({ topOpportunities = [], allMarketData = [], isLiv
             return saved || "http://localhost:8000";
         }
 
-        return saved || "https://newbot-apj2.onrender.com";
+        return saved || "https://bybit-bianance-bot.onrender.com";
     };
 
     // Helper to get auth headers

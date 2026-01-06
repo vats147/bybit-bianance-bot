@@ -32,7 +32,7 @@ export function PnLPage() {
 
         const defaultUrl = (hostname === "localhost" || hostname === "127.0.0.1")
             ? "http://localhost:8000"
-            : "https://newbot-apj2.onrender.com";
+            : "https://bybit-bianance-bot.onrender.com";
         return saved || defaultUrl;
     };
 
