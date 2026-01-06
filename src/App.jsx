@@ -12,7 +12,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
-import { ArrowUpDown, ExternalLink, RefreshCw, Settings, AlertTriangle, LayoutDashboard, Activity, Zap, History } from "lucide-react";
+import { ArrowUpDown, ExternalLink, RefreshCw, Settings, AlertTriangle, LayoutDashboard, Activity, Zap, History, Trophy } from "lucide-react";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useToast } from "@/components/ui/toast";
 import { cn } from "@/lib/utils";
